@@ -29,6 +29,7 @@ local CONFIG = {
 	GemRadius  = 60,               -- เก็บเพชรเฉพาะที่อยู่ใกล้ตัวในรัศมีนี้ (studs)
 	GemStay    = 0.6,              -- ยืนบนเพชรรอให้เก็บติดนานสุดกี่วินาที
 	TeleportRetries = 3,           -- วาร์ปซ้ำกี่ครั้งถ้าเกมดึงตัวกลับ
+	NoWarpDist = 300,              -- ห่างจากกลางโซนที่เลือกไม่เกินนี้ = ไม่ต้องวาร์ป Tween ไปเลย
 	TeleportVia = { [13] = 12 },   -- โซนที่ไกลเกินวาร์ปตรง: วาร์ปไปโซนนี้ก่อน แล้ว Tween ต่อ
 	SwingPressGap = 0.8,           -- กดปุ่ม Auto Swing แล้วรออย่างน้อยกี่วินาทีก่อนกดซ้ำ (รอปุ่มเปลี่ยนสี)
 	TweenSpeed = 300,              -- ความเร็ว Tween (studs/วินาที)
@@ -41,7 +42,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r22"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r23"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -166,16 +167,32 @@ local function findGuiButton(text, exact)
 	end
 end
 
--- กดปุ่ม GUI ของเกม (ใช้ getconnections ถ้ามี ไม่งั้นจำลองการคลิกเมาส์)
-local function pressButton(btn)
-	if getconnections then
-		for _, sig in ipairs({ btn.Activated, btn.MouseButton1Click, btn.MouseButton1Down }) do
+-- กดปุ่ม GUI ของเกม มีหลายวิธี เพราะแต่ละเกม/ตัวรันรับไม่เหมือนกัน
+--   method 1: ยิง MouseButton1Click ที่เกมผูกไว้   2: ยิง Activated
+--   method 3: firesignal                          4: จำลองคลิกเมาส์ที่ตำแหน่งปุ่ม
+local function pressButton(btn, method)
+	method = method or 1
+	if method == 1 or method == 2 then
+		if getconnections then
+			local sig = method == 1 and btn.MouseButton1Click or btn.Activated
 			local conns = getconnections(sig)
 			if #conns > 0 then
-				for _, c in ipairs(conns) do pcall(function() c:Fire() end) end
-				return
+				for _, c in ipairs(conns) do
+					pcall(function()
+						if c.Function then c.Function() else c:Fire() end
+					end)
+				end
+				return true
 			end
 		end
+		return false
+	elseif method == 3 then
+		if firesignal then
+			pcall(firesignal, btn.MouseButton1Click)
+			pcall(firesignal, btn.Activated)
+			return true
+		end
+		return false
 	end
 	local vim = game:GetService("VirtualInputManager")
 	local sg = btn:FindFirstAncestorWhichIsA("ScreenGui")
@@ -184,6 +201,7 @@ local function pressButton(btn)
 	vim:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 0)
 	task.wait(0.05)
 	vim:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
+	return true
 end
 
 -- ปุ่ม Auto Swing ของเกม: PlayerGui.MainGUI.AutoSwing
@@ -295,7 +313,7 @@ end
 --   เปิด = ยืนติดไข่ที่กำลังจะตีแล้ว, ปิด = ระหว่างเดินทาง / หลังไข่แตก
 -- กดทันทีเมื่อสถานะไม่ตรงกับที่ต้องการ (อ่านจาก AutoSwingColorAlpha ซึ่งแม่น)
 local lastObserved, dumps = "init", 0
-local lastSwingPress = 0
+local lastSwingPress, swingMethod, pressedFor = 0, 1, nil
 local function syncAutoSwing()
 	local btn = getAutoSwingBtn()
 	if not btn or not isShown(btn) then return end
@@ -304,12 +322,18 @@ local function syncAutoSwing()
 		lastObserved, dumps = on, dumps + 1
 		dumpAutoSwing(btn)
 	end
-	if on == nil or on == State.SwingWant then return end
+	if on == nil then return end
+	if on == State.SwingWant then pressedFor = nil return end
 	-- กดแล้วปุ่มต้องใช้เวลาเปลี่ยนสี (ค่า alpha ค่อย ๆ ขยับ) รอก่อนค่อยกดซ้ำ
 	if os.clock() - lastSwingPress < CONFIG.SwingPressGap then return end
-	lastSwingPress = os.clock()
-	log(State.SwingWant and "เปิด Auto Swing" or "ปิด Auto Swing")
-	pressButton(btn)
+	if pressedFor == State.SwingWant then
+		-- กดไปแล้วแต่สถานะไม่เปลี่ยน: เปลี่ยนวิธีกด
+		swingMethod = swingMethod % 4 + 1
+		print("[FarmHub] ปุ่ม Auto Swing ไม่ตอบสนอง ลองวิธีกดแบบที่", swingMethod)
+	end
+	lastSwingPress, pressedFor = os.clock(), State.SwingWant
+	log(State.SwingWant and "เปิด Auto Swing" or "ปิด Auto Swing", "วิธี", swingMethod)
+	if not pressButton(btn, swingMethod) then swingMethod = swingMethod % 4 + 1 end
 end
 
 -- ตั้งสถานะที่ต้องการ แล้วกดทันที (ไม่ต้องรอ) ถ้าไม่ตรง
@@ -783,6 +807,25 @@ local function goToZone(zoneName, shouldStop)
 	task.wait(0.3)   -- รอไข่ในโซนโหลด
 end
 
+-- อยู่ในโซนนี้หรือใกล้พอจะ Tween ไปเองได้ไหม (ไม่ต้องวาร์ป)
+--   ใกล้ = โซนที่ตัวละครอยู่ใกล้ที่สุดคือโซนนี้ หรือห่างจากกลางโซนไม่เกิน CONFIG.NoWarpDist
+local function isNearZone(zoneName)
+	local _, root = getChar()
+	if not root then return false end
+	local target = ZonePos[zoneName]
+	if not target then
+		local _, z = nearestZoneEgg()
+		return z == zoneName
+	end
+	if (target - root.Position).Magnitude <= CONFIG.NoWarpDist then return true end
+	local best, bestDist
+	for name, pos in pairs(ZonePos) do
+		local d = (pos - root.Position).Magnitude
+		if not bestDist or d < bestDist then best, bestDist = name, d end
+	end
+	return best == zoneName
+end
+
 ---------------------------------------------------------------------
 -- Callbacks
 ---------------------------------------------------------------------
@@ -821,6 +864,10 @@ function Callbacks.AutoFarm(on)
 	while not stopped() do
 		if not getChar() then
 			task.wait(0.5)
+		elseif State.ReadyZone ~= State.Zone and isNearZone(State.Zone) then
+			-- อยู่ในโซนที่เลือก (หรือใกล้มาก) อยู่แล้ว: ไม่ต้องทำขั้นเตรียม/วาร์ป ฟาร์มเลย
+			State.ReadyZone = State.Zone
+			say("อยู่ใกล้", State.Zone, "แล้ว เริ่มฟาร์มเลย")
 		elseif State.ReadyZone ~= State.Zone then
 			local target = State.Zone
 			local warmZone = warmUp(stopped)
