@@ -42,7 +42,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r27"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r28"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -336,10 +336,59 @@ local function syncAutoSwing()
 	if not pressButton(btn, swingMethod) then swingMethod = swingMethod % 4 + 1 end
 end
 
--- ตั้งสถานะที่ต้องการ แล้วกดทันที (ไม่ต้องรอ) ถ้าไม่ตรง
+-- คุม Auto Swing ผ่านโค้ดของเกม (PlayerScripts.Client.Controllers.AutoSwingController) แทนการกดปุ่ม
+-- พิมพ์รายชื่อฟังก์ชันลง log ครั้งแรก (ไว้ดูว่าใช้ตัวไหนได้)
+local swingCtrl, swingCtrlTried = nil, false
+local function getSwingController()
+	if swingCtrlTried then return swingCtrl end
+	swingCtrlTried = true
+	local ps = player:FindFirstChild("PlayerScripts")
+	local client = ps and ps:FindFirstChild("Client")
+	local ctrls = client and client:FindFirstChild("Controllers")
+	local mod = ctrls and ctrls:FindFirstChild("AutoSwingController")
+	if not mod then print("[FarmHub] ไม่พบ AutoSwingController") return nil end
+	local ok, res = pcall(require, mod)
+	if not ok or type(res) ~= "table" then
+		print("[FarmHub] require AutoSwingController ไม่ได้:", res)
+		return nil
+	end
+	local keys = {}
+	for k, v in pairs(res) do table.insert(keys, tostring(k) .. "=" .. typeof(v) .. (type(v) ~= "function" and type(v) ~= "table" and ("(" .. tostring(v) .. ")") or "")) end
+	print("[FarmHub] AutoSwingController:", table.concat(keys, ", "))
+	swingCtrl = res
+	return res
+end
+
+-- ลองสั่งเปิด/ปิดผ่านฟังก์ชันของเกม คืน true ถ้าเรียกได้
+local function controllerSetSwing(on)
+	local c = getSwingController()
+	if not c then return false end
+	for _, name in ipairs({ "SetEnabled", "SetAutoSwing", "SetActive", "SetState", "Set" }) do
+		if type(c[name]) == "function" then
+			if pcall(c[name], c, on) then return true end
+			if pcall(c[name], on) then return true end
+		end
+	end
+	for _, name in ipairs(on and { "Enable", "Start", "Activate", "TurnOn" } or { "Disable", "Stop", "Deactivate", "TurnOff" }) do
+		if type(c[name]) == "function" then
+			if pcall(c[name], c) then return true end
+			if pcall(c[name]) then return true end
+		end
+	end
+	return false
+end
+
+-- ตั้งสถานะที่ต้องการ: ลองผ่านโค้ดเกมก่อน ถ้าไม่ได้ค่อยกดปุ่ม
 local function setSwing(on)
-	if State.SwingWant ~= on then lastSwingPress = 0 end
-	State.SwingWant = on
+	if State.SwingWant ~= on then
+		lastSwingPress = 0
+		State.SwingWant = on
+		local btn = getAutoSwingBtn()
+		if btn and autoSwingIsOn(btn) ~= on and controllerSetSwing(on) then
+			lastSwingPress = os.clock()
+			return
+		end
+	end
 	syncAutoSwing()
 end
 
@@ -559,21 +608,42 @@ local function sendHit(eggPart)
 end
 
 -- Tween ไปข้างไข่ แล้วตีจนแตก
+-- มีเพชรตกอยู่ใกล้ ๆ ไหม
+local function gemsAround()
+	local drops = workspace:FindFirstChild("EggGemDrops")
+	return drops ~= nil and #drops:GetChildren() > 0
+end
+
+-- เก็บเพชรก่อนเสมอ (ปิด Auto Swing ระหว่างเก็บ กันตีโดนไข่ระหว่างทาง)
+local function collectGemsFirst(shouldStop)
+	if not (State.CollectGems and grabNearbyGems and gemsAround()) then return end
+	setSwing(false)
+	grabNearbyGems(shouldStop, CONFIG.GemRadius)
+end
+
+-- แบบเดียวกับ MYHUB: เก็บเพชรก่อน -> Tween ไปไข่ (Auto Swing ปิด) -> ถึงไข่เปิด Auto Swing -> ไข่แตกปิด
 local function breakEgg(egg, shouldStop, skipGems)
+	if not skipGems then collectGemsFirst(shouldStop) end
 	local _, root = getChar()
-	getTool()          -- ถือที่ขุดไว้
-	setSwing(false)    -- ปุ่ม Auto Swing ของเกม: ปิดไว้ตลอด (เราตีเอง)
+	getTool()          -- ถือที่ขุด (ปุ่ม Auto Swing จะโผล่)
+	setSwing(false)    -- ระหว่างเดินทาง: ปิด
 	if not root or not tweenTo(eggCFrame(egg, root), shouldStop) then return false end
 	log("ตีไข่:", egg:GetAttribute("EggType"), "HP", egg:GetAttribute("Health"))
 	local spot = eggCFrame(egg, root)   -- จุดยืน (บนพื้น)
+	setSwing(true)     -- ถึงไข่เป้าหมาย: เปิด
 	local started, lastHit, lastGemCheck = os.clock(), 0, 0
 	while eggAlive(egg) and not shouldStop() and os.clock() - started < CONFIG.EggTimeout do
-		-- มีเพชรดรอปอยู่: เก็บเพชรก่อน แล้วค่อยกลับมาตีต่อ
-		if not skipGems and State.CollectGems and grabNearbyGems and os.clock() - lastGemCheck > 0.15 then
+		-- มีเพชรดรอป: หยุดตี ไปเก็บเพชรก่อน แล้วกลับมาตีต่อ
+		if not skipGems and os.clock() - lastGemCheck > 0.15 then
 			lastGemCheck = os.clock()
-			grabNearbyGems(shouldStop, CONFIG.GemRadius)
+			if State.CollectGems and gemsAround() then
+				collectGemsFirst(shouldStop)
+				local _, r = getChar()
+				if r then tweenTo(spot, shouldStop) end
+				setSwing(true)
+			end
 		end
-		-- ถ้าหลุดจากจุดยืน (ไปเก็บเพชร/โดนดัน) ค่อยวางกลับ ไม่งั้นปล่อยให้ยืนตามแรงโน้มถ่วง เท้าติดพื้น
+		-- หลุดจากจุดยืนค่อยวางกลับ ไม่งั้นปล่อยยืนตามแรงโน้มถ่วง เท้าติดพื้น
 		local _, r = getChar()
 		if r then
 			local flat = Vector3.new(r.Position.X - spot.Position.X, 0, r.Position.Z - spot.Position.Z)
@@ -582,16 +652,21 @@ local function breakEgg(egg, shouldStop, skipGems)
 				r.AssemblyLinearVelocity = Vector3.zero
 			end
 		end
-		if os.clock() - lastHit >= hitGap then
+		syncAutoSwing()
+		-- ถ้า Auto Swing ของเกมยังไม่เปิด ตีเองแทน (ส่ง EggHitRequest ไปที่ไข่เป้าหมาย)
+		local btn = getAutoSwingBtn()
+		local swingOn = btn and autoSwingIsOn(btn)
+		if not swingOn and os.clock() - lastHit >= hitGap then
 			lastHit = os.clock()
 			getTool()
 			if not sendHit(egg) then
 				local tool = getTool()
-				if tool then tool:Activate() end   -- เกมไม่มี EggHitRequest: ใช้การตีปกติแทน
+				if tool then tool:Activate() end
 			end
 		end
 		task.wait()   -- เช็กทุกเฟรม: ไข่แตกปุ๊บ ไปใบต่อไปทันที
 	end
+	setSwing(false)    -- ไข่เป้าหมายแตก: ปิดทันที กันตีโดนไข่ใบอื่น
 	return not eggAlive(egg)
 end
 
