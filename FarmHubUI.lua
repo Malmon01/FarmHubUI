@@ -42,7 +42,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r15"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r16"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -97,6 +97,8 @@ local State = {
 	ReadyZone   = nil,
 	AutoSwingChar = nil,
 	GemRun      = 0,
+	Rarities    = {},              -- ความหายากที่เลือก (ว่าง = ทุกระดับ)
+	Priority    = "ใกล้สุดก่อน",
 }
 
 ---------------------------------------------------------------------
@@ -256,23 +258,74 @@ local function eggAlive(part)
 		and (part:GetAttribute("Health") or 1) > 0
 end
 
--- หาไข่ที่ใกล้ที่สุดในโซน (filter = ชื่อชนิดไข่ หรือ ALL_EGGS) คืนค่า (ไข่, ระยะ)
-local function findEgg(zoneName, filter)
+-- ความหายากของไข่ (EggInfoRarity) เรียงจากธรรมดา -> หายากสุด
+local RARITY_ORDER = {
+	"Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Divine", "Cosmic",
+	"Secret", "Celestial", "Inferno", "Void", "Omega", "Spectral", "Ethereal",
+}
+local RARITY_RANK = {}
+for i, r in ipairs(RARITY_ORDER) do RARITY_RANK[r] = i end
+
+local PRIORITY_NEAR, PRIORITY_RARE, PRIORITY_LUCK = "ใกล้สุดก่อน", "หายากสุดก่อน", "Luck สูงสุดก่อน"
+
+local function eggRarity(part) return part:GetAttribute("EggInfoRarity") or "?" end
+local function eggLuck(part) return part:GetAttribute("HatchLuck") or part:GetAttribute("Luck") or 0 end
+
+-- ผ่านตัวกรองความหายากไหม (ไม่ได้เลือกเลย = ผ่านทุกระดับ)
+local function rarityAllowed(part)
+	if next(State.Rarities) == nil then return true end
+	return State.Rarities[eggRarity(part)] == true
+end
+
+-- หาไข่ในโซน
+--   filter   = ชื่อชนิดไข่ หรือ ALL_EGGS
+--   usePrefs = true: ใช้ตัวกรองความหายาก + ลำดับการตีที่ตั้งไว้ (ใช้ตอนฟาร์ม)
+-- คืนค่า (ไข่, ระยะ)
+local function findEgg(zoneName, filter, usePrefs)
 	local zone = CONFIG.ZoneModels[zoneName]
 	local folder = zone and zone:FindFirstChild("Eggs")
 	local _, root = getChar()
 	if not folder or not root then return end
-	local best, bestDist
+	local priority = usePrefs and State.Priority or PRIORITY_NEAR
+	local best, bestDist, bestScore
 	for _, m in ipairs(folder:GetChildren()) do
 		local part = m:FindFirstChild("Egg")
-		if part and part:IsA("BasePart") and eggAlive(part) then
-			if filter == ALL_EGGS or part:GetAttribute("EggType") == filter then
-				local d = (part.Position - root.Position).Magnitude
-				if not bestDist or d < bestDist then best, bestDist = part, d end
+		if part and part:IsA("BasePart") and eggAlive(part)
+			and (filter == ALL_EGGS or part:GetAttribute("EggType") == filter)
+			and (not usePrefs or rarityAllowed(part)) then
+			local d = (part.Position - root.Position).Magnitude
+			local score = 0
+			if priority == PRIORITY_RARE then
+				score = RARITY_RANK[eggRarity(part)] or 0
+			elseif priority == PRIORITY_LUCK then
+				score = eggLuck(part)
+			end
+			-- คะแนนสูงกว่าชนะ ถ้าเท่ากันเอาใบที่ใกล้กว่า
+			if not best or score > bestScore or (score == bestScore and d < bestDist) then
+				best, bestDist, bestScore = part, d, score
 			end
 		end
 	end
 	return best, bestDist
+end
+
+-- ความหายากที่มีในโซนตอนนี้ (เรียงจากธรรมดา -> หายาก)
+local function raritiesOf(zoneName)
+	local zone = CONFIG.ZoneModels[zoneName]
+	local folder = zone and zone:FindFirstChild("Eggs")
+	local seen, list = {}, {}
+	if folder then
+		for _, m in ipairs(folder:GetChildren()) do
+			local part = m:FindFirstChild("Egg")
+			local r = part and part:GetAttribute("EggInfoRarity")
+			if r and not seen[r] then seen[r] = true table.insert(list, r) end
+		end
+	end
+	for r in pairs(State.Rarities) do   -- เก็บตัวที่เลือกไว้ แม้โซนนี้จะยังไม่มี
+		if not seen[r] then seen[r] = true table.insert(list, r) end
+	end
+	table.sort(list, function(a, b) return (RARITY_RANK[a] or 99) < (RARITY_RANK[b] or 99) end)
+	return list
 end
 
 -- ไข่ที่ใกล้ที่สุดจากทุกโซน = โซนที่ใกล้ที่สุด คืนค่า (ไข่, ชื่อโซน)
@@ -654,6 +707,7 @@ function Callbacks.AutoFarm(on)
 	if not on then return end
 	local run = State.FarmRun
 	local function stopped() return not State.AutoFarm or State.FarmRun ~= run end
+	local waiting = true
 
 	while not stopped() do
 		if not getChar() then
@@ -670,10 +724,12 @@ function Callbacks.AutoFarm(on)
 				goToZone(target, stopped)   -- วาร์ป (โซนไกลวาร์ปผ่านโซนก่อนหน้า) แล้วเริ่มฟาร์ม
 			end
 		else
-			local egg = findEgg(State.Zone, State.Egg)
+			local egg = findEgg(State.Zone, State.Egg, true)
 			if egg then
+				if waiting then say("ตีไข่:", egg:GetAttribute("EggType"), egg:GetAttribute("EggInfoRarity")) waiting = false end
 				breakEgg(egg, function() return stopped() or State.ReadyZone ~= State.Zone end)
 			else
+				if not waiting then say("ไม่มีไข่ตามตัวกรองใน", State.Zone, "รอไข่เกิด") waiting = true end
 				task.wait(0.5)   -- ไม่มีไข่ รอเกิดใหม่
 			end
 		end
@@ -1150,17 +1206,111 @@ local function makeDropdown(page, text, options, default, callback)
 	return { Set = set, Get = function() return current end, SetOptions = setOptions }
 end
 
+-- เลือกได้หลายตัว (selected = ตาราง { [ชื่อ] = true }) ไม่เลือกเลย = ทั้งหมด
+local function makeMultiSelect(page, text, options, selected, callback)
+	local ROW_H, ITEM_H, GAP = 40, 28, 4
+	local CLEAR = "ล้าง (ทุกระดับ)"
+	local row = makeRow(page, ROW_H)
+	label(row, text, { Position = UDim2.fromOffset(12, 0), Size = UDim2.new(0.45, -12, 0, ROW_H) })
+
+	local btn = create("TextButton", {
+		AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 6),
+		Size = UDim2.new(0.55, -8, 0, ROW_H - 12), BackgroundColor3 = C.Input,
+		Text = "", AutoButtonColor = false, Parent = row,
+	})
+	corner(btn, 6)
+	local valueLabel = label(btn, "", {
+		Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -34, 1, 0), TextSize = 15,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+	})
+	local arrow = label(btn, "v", {
+		AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 0),
+		Size = UDim2.new(0, 16, 1, 0), TextXAlignment = Enum.TextXAlignment.Right,
+		TextColor3 = C.Accent, Font = Enum.Font.GothamBold,
+	})
+	local list = create("Frame", {
+		AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, ROW_H),
+		Size = UDim2.new(0.55, -8, 0, 0), BackgroundTransparency = 1, Parent = row,
+	})
+	create("UIListLayout", { Padding = UDim.new(0, GAP), SortOrder = Enum.SortOrder.LayoutOrder, Parent = list })
+
+	local isOpen, opts, items = false, {}, {}
+
+	local function refreshText()
+		local names = {}
+		for _, o in ipairs(opts) do if selected[o] then table.insert(names, o) end end
+		for o in pairs(selected) do if not table.find(names, o) then table.insert(names, o) end end
+		valueLabel.Text = #names == 0 and "ทั้งหมด" or table.concat(names, ", ")
+		for o, item in pairs(items) do
+			local on = selected[o] == true
+			item.BackgroundColor3 = on and C.Accent or C.Input
+			item.TextColor3 = on and C.Knob or C.Text
+		end
+	end
+
+	local function setOpen(v)
+		isOpen = v
+		local h = v and (ROW_H + (#opts + 1) * (ITEM_H + GAP) + 4) or ROW_H
+		tween(row, { Size = UDim2.new(1, 0, 0, h) })
+		arrow.Text = v and "^" or "v"
+	end
+
+	local function changed()
+		refreshText()
+		if callback then task.spawn(callback, selected) end
+	end
+
+	local function setOptions(newOpts)
+		opts = newOpts or {}
+		for _, c in ipairs(list:GetChildren()) do
+			if c:IsA("TextButton") then c:Destroy() end
+		end
+		items = {}
+		list.Size = UDim2.new(0.55, -8, 0, (#opts + 1) * (ITEM_H + GAP))
+		local clear = create("TextButton", {
+			Size = UDim2.new(1, 0, 0, ITEM_H), LayoutOrder = 0, BackgroundColor3 = C.Row,
+			AutoButtonColor = true, Font = FONT, Text = CLEAR, TextSize = 14,
+			TextColor3 = C.SubText, Parent = list,
+		})
+		corner(clear, 6)
+		clear.MouseButton1Click:Connect(function()
+			for k in pairs(selected) do selected[k] = nil end
+			changed()
+		end)
+		for i, o in ipairs(opts) do
+			local item = create("TextButton", {
+				Size = UDim2.new(1, 0, 0, ITEM_H), LayoutOrder = i,
+				BackgroundColor3 = C.Input, AutoButtonColor = true,
+				Font = FONT, Text = o, TextSize = 14, TextColor3 = C.Text, Parent = list,
+			})
+			corner(item, 6)
+			items[o] = item
+			item.MouseButton1Click:Connect(function()
+				selected[o] = (not selected[o]) or nil
+				changed()
+			end)
+		end
+		refreshText()
+		if isOpen then setOpen(true) end
+	end
+
+	btn.MouseButton1Click:Connect(function() setOpen(not isOpen) end)
+	setOptions(options)
+	return { SetOptions = setOptions }
+end
+
 ---------------------------------------------------------------------
 -- Build pages
 ---------------------------------------------------------------------
 -- 1) ฟาร์ม
 local farmPage = addTab("ฟาร์ม")
-local eggDropdown
+local eggDropdown, rarityPicker
 
 makeDropdown(farmPage, "เลือกโซน", CONFIG.ZoneOrder, State.Zone, function(zone)
 	State.Zone = zone
 	eggDropdown.SetOptions(eggTypesOf(zone))   -- เปลี่ยนไข่ตามโซนที่เลือก
 	eggDropdown.Set(ALL_EGGS)
+	if rarityPicker then rarityPicker.SetOptions(raritiesOf(zone)) end
 	Callbacks.ZoneChanged(zone)
 end)
 
@@ -1176,8 +1326,16 @@ eggDropdown = makeDropdown(farmPage, "เลือกไข่", eggTypesOf(Stat
 	State.Egg = egg
 	Callbacks.EggChanged(egg)
 end)
+rarityPicker = makeMultiSelect(farmPage, "ความหายาก", raritiesOf(State.Zone), State.Rarities, function()
+	say("ตัวกรองความหายาก:", next(State.Rarities) and "ตั้งแล้ว" or "ทุกระดับ")
+end)
+makeDropdown(farmPage, "ลำดับการตี", { PRIORITY_NEAR, PRIORITY_RARE, PRIORITY_LUCK }, State.Priority, function(p)
+	State.Priority = p
+	say("ลำดับการตี:", p)
+end)
 makeButton(farmPage, "รีเฟรชรายชื่อไข่", function()
 	eggDropdown.SetOptions(eggTypesOf(State.Zone))
+	rarityPicker.SetOptions(raritiesOf(State.Zone))
 end)
 makeNote(farmPage, "* รายการไข่จะเปลี่ยนตามโซนที่เลือก")
 statusLabel = label(farmPage, "สถานะ: พร้อม", {
