@@ -42,7 +42,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r16"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r17"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -70,7 +70,7 @@ end
 
 -- รายชื่อชนิดไข่ในโซน (อ่านจากชื่อโมเดล "1: Forest Egg", "2: Rock Egg", ...)
 local function eggTypesOf(zoneName)
-	local list, found, seen = { ALL_EGGS }, {}, {}
+	local list, found, seen = {}, {}, {}
 	local zone = CONFIG.ZoneModels[zoneName]
 	local folder = zone and zone:FindFirstChild("Eggs")
 	if folder then
@@ -89,7 +89,7 @@ end
 
 local State = {
 	Zone        = CONFIG.ZoneOrder[1],
-	Egg         = ALL_EGGS,
+	Eggs        = {},              -- ชนิดไข่ที่เลือก (ว่าง = ทุกชนิด)
 	AutoFarm    = false,
 	CollectGems = false,
 	Debug       = false,
@@ -97,7 +97,6 @@ local State = {
 	ReadyZone   = nil,
 	AutoSwingChar = nil,
 	GemRun      = 0,
-	Rarities    = {},              -- ความหายากที่เลือก (ว่าง = ทุกระดับ)
 	Priority    = "ใกล้สุดก่อน",
 }
 
@@ -271,15 +270,15 @@ local PRIORITY_NEAR, PRIORITY_RARE, PRIORITY_LUCK = "ใกล้สุดก่
 local function eggRarity(part) return part:GetAttribute("EggInfoRarity") or "?" end
 local function eggLuck(part) return part:GetAttribute("HatchLuck") or part:GetAttribute("Luck") or 0 end
 
--- ผ่านตัวกรองความหายากไหม (ไม่ได้เลือกเลย = ผ่านทุกระดับ)
-local function rarityAllowed(part)
-	if next(State.Rarities) == nil then return true end
-	return State.Rarities[eggRarity(part)] == true
+-- ผ่านตัวกรองชนิดไข่ไหม (ไม่ได้เลือกเลย = ทุกชนิด)
+local function eggSelected(part)
+	if next(State.Eggs) == nil then return true end
+	return State.Eggs[part:GetAttribute("EggType")] == true
 end
 
 -- หาไข่ในโซน
 --   filter   = ชื่อชนิดไข่ หรือ ALL_EGGS
---   usePrefs = true: ใช้ตัวกรองความหายาก + ลำดับการตีที่ตั้งไว้ (ใช้ตอนฟาร์ม)
+--   usePrefs = true: ใช้ชนิดไข่ที่เลือก + ลำดับการตีที่ตั้งไว้ (ใช้ตอนฟาร์ม)
 -- คืนค่า (ไข่, ระยะ)
 local function findEgg(zoneName, filter, usePrefs)
 	local zone = CONFIG.ZoneModels[zoneName]
@@ -292,7 +291,7 @@ local function findEgg(zoneName, filter, usePrefs)
 		local part = m:FindFirstChild("Egg")
 		if part and part:IsA("BasePart") and eggAlive(part)
 			and (filter == ALL_EGGS or part:GetAttribute("EggType") == filter)
-			and (not usePrefs or rarityAllowed(part)) then
+			and (not usePrefs or eggSelected(part)) then
 			local d = (part.Position - root.Position).Magnitude
 			local score = 0
 			if priority == PRIORITY_RARE then
@@ -309,24 +308,6 @@ local function findEgg(zoneName, filter, usePrefs)
 	return best, bestDist
 end
 
--- ความหายากที่มีในโซนตอนนี้ (เรียงจากธรรมดา -> หายาก)
-local function raritiesOf(zoneName)
-	local zone = CONFIG.ZoneModels[zoneName]
-	local folder = zone and zone:FindFirstChild("Eggs")
-	local seen, list = {}, {}
-	if folder then
-		for _, m in ipairs(folder:GetChildren()) do
-			local part = m:FindFirstChild("Egg")
-			local r = part and part:GetAttribute("EggInfoRarity")
-			if r and not seen[r] then seen[r] = true table.insert(list, r) end
-		end
-	end
-	for r in pairs(State.Rarities) do   -- เก็บตัวที่เลือกไว้ แม้โซนนี้จะยังไม่มี
-		if not seen[r] then seen[r] = true table.insert(list, r) end
-	end
-	table.sort(list, function(a, b) return (RARITY_RANK[a] or 99) < (RARITY_RANK[b] or 99) end)
-	return list
-end
 
 -- ไข่ที่ใกล้ที่สุดจากทุกโซน = โซนที่ใกล้ที่สุด คืนค่า (ไข่, ชื่อโซน)
 local function nearestZoneEgg()
@@ -642,7 +623,7 @@ end
 
 -- ตำแหน่งปลายทางในโซน: ข้างไข่ (ถ้าเห็นไข่แล้ว) หรือกลางโซน
 local function zoneTarget(zoneName, root)
-	local egg = findEgg(zoneName, State.Egg) or findEgg(zoneName, ALL_EGGS)
+	local egg = findEgg(zoneName, ALL_EGGS, true) or findEgg(zoneName, ALL_EGGS)
 	if egg then return eggCFrame(egg, root) end
 	local zone = CONFIG.ZoneModels[zoneName]
 	return zone and (zone:GetPivot() + Vector3.new(0, 5, 0))
@@ -724,7 +705,7 @@ function Callbacks.AutoFarm(on)
 				goToZone(target, stopped)   -- วาร์ป (โซนไกลวาร์ปผ่านโซนก่อนหน้า) แล้วเริ่มฟาร์ม
 			end
 		else
-			local egg = findEgg(State.Zone, State.Egg, true)
+			local egg = findEgg(State.Zone, ALL_EGGS, true)
 			if egg then
 				if waiting then say("ตีไข่:", egg:GetAttribute("EggType"), egg:GetAttribute("EggInfoRarity")) waiting = false end
 				breakEgg(egg, function() return stopped() or State.ReadyZone ~= State.Zone end)
@@ -1207,9 +1188,9 @@ local function makeDropdown(page, text, options, default, callback)
 end
 
 -- เลือกได้หลายตัว (selected = ตาราง { [ชื่อ] = true }) ไม่เลือกเลย = ทั้งหมด
-local function makeMultiSelect(page, text, options, selected, callback)
+local function makeMultiSelect(page, text, options, selected, callback, clearText)
 	local ROW_H, ITEM_H, GAP = 40, 28, 4
-	local CLEAR = "ล้าง (ทุกระดับ)"
+	local CLEAR = clearText or "ล้าง (ทั้งหมด)"
 	local row = makeRow(page, ROW_H)
 	label(row, text, { Position = UDim2.fromOffset(12, 0), Size = UDim2.new(0.45, -12, 0, ROW_H) })
 
@@ -1304,13 +1285,24 @@ end
 ---------------------------------------------------------------------
 -- 1) ฟาร์ม
 local farmPage = addTab("ฟาร์ม")
-local eggDropdown, rarityPicker
+local eggPicker, lastEggList
+
+-- อัปเดตรายชื่อไข่ของโซนที่เลือก (เรียกตอนเปลี่ยนโซน และวนเช็กเองทุก 1.5 วิ)
+local function refreshEggList()
+	if not eggPicker then return end
+	local list = eggTypesOf(State.Zone)
+	local key = table.concat(list, "|")
+	if key ~= lastEggList then
+		lastEggList = key
+		eggPicker.SetOptions(list)
+	end
+end
 
 makeDropdown(farmPage, "เลือกโซน", CONFIG.ZoneOrder, State.Zone, function(zone)
 	State.Zone = zone
-	eggDropdown.SetOptions(eggTypesOf(zone))   -- เปลี่ยนไข่ตามโซนที่เลือก
-	eggDropdown.Set(ALL_EGGS)
-	if rarityPicker then rarityPicker.SetOptions(raritiesOf(zone)) end
+	for k in pairs(State.Eggs) do State.Eggs[k] = nil end   -- ไข่ของโซนเก่าใช้ไม่ได้แล้ว
+	lastEggList = nil
+	refreshEggList()
 	Callbacks.ZoneChanged(zone)
 end)
 
@@ -1322,22 +1314,21 @@ makeToggle(farmPage, "เริ่มฟาร์ม", false, function(on)
 end)
 gemToggle = makeToggle(farmPage, "เก็บเพชร", false, Callbacks.CollectGems)
 
-eggDropdown = makeDropdown(farmPage, "เลือกไข่", eggTypesOf(State.Zone), State.Egg, function(egg)
-	State.Egg = egg
-	Callbacks.EggChanged(egg)
-end)
-rarityPicker = makeMultiSelect(farmPage, "ความหายาก", raritiesOf(State.Zone), State.Rarities, function()
-	say("ตัวกรองความหายาก:", next(State.Rarities) and "ตั้งแล้ว" or "ทุกระดับ")
+eggPicker = makeMultiSelect(farmPage, "เลือกไข่", {}, State.Eggs, function()
+	say("เลือกไข่:", next(State.Eggs) and "ตั้งแล้ว" or "ทุกชนิด")
+end, "ล้าง (ทุกชนิด)")
+refreshEggList()
+task.spawn(function()
+	while gui.Parent do
+		refreshEggList()
+		task.wait(1.5)
+	end
 end)
 makeDropdown(farmPage, "ลำดับการตี", { PRIORITY_NEAR, PRIORITY_RARE, PRIORITY_LUCK }, State.Priority, function(p)
 	State.Priority = p
 	say("ลำดับการตี:", p)
 end)
-makeButton(farmPage, "รีเฟรชรายชื่อไข่", function()
-	eggDropdown.SetOptions(eggTypesOf(State.Zone))
-	rarityPicker.SetOptions(raritiesOf(State.Zone))
-end)
-makeNote(farmPage, "* รายการไข่จะเปลี่ยนตามโซนที่เลือก")
+makeNote(farmPage, "* รายชื่อไข่อัปเดตเองตามโซนที่เลือก (เลือกได้หลายชนิด)")
 statusLabel = label(farmPage, "สถานะ: พร้อม", {
 	Size = UDim2.new(1, 0, 0, 20), LayoutOrder = nextOrder(),
 	TextSize = 13, TextColor3 = C.Accent, TextTruncate = Enum.TextTruncate.AtEnd,
