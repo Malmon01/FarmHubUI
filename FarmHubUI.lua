@@ -27,7 +27,6 @@ local CONFIG = {
 	HitInterval = 0.2,             -- ตีไข่ (ส่ง EggHitRequest) ทุกกี่วินาที (ถ้าโดนปฏิเสธจะช้าลงเอง)
 	EggTimeout = 20,               -- ตีไข่ใบเดียวนานสุดกี่วินาที แล้วข้ามไปใบอื่น
 	GemRadius  = 60,               -- เก็บเพชรเฉพาะที่อยู่ใกล้ตัวในรัศมีนี้ (studs)
-	GemDropWait = 0.4,             -- ไข่แตกแล้วรอเพชรดรอปนานสุดกี่วินาที ก่อนไปไข่ใบต่อไป
 	GemStay    = 0.25,             -- ยืนบนเพชรรอให้เก็บติดนานสุดกี่วินาที
 	TeleportRetries = 3,           -- วาร์ปซ้ำกี่ครั้งถ้าเกมดึงตัวกลับ
 	NoWarpDist = 300,              -- ห่างจากกลางโซนที่เลือกไม่เกินนี้ = ไม่ต้องวาร์ป Tween ไปเลย
@@ -43,7 +42,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r26"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r27"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -354,8 +353,10 @@ local function isCarrying()
 	return dropBtn ~= nil
 end
 
+-- ไข่ที่เกมยืนยันว่าเลือดหมดแล้ว (จาก EggHitConfirmed) รู้ก่อน Attribute อัปเดต จะได้ไปใบต่อไปทันที
+local brokenEggs = setmetatable({}, { __mode = "k" })
 local function eggAlive(part)
-	return part and part.Parent ~= nil
+	return part and part.Parent ~= nil and not (brokenEggs[part] and os.clock() - brokenEggs[part] < 5)
 		and part:GetAttribute("Broken") ~= true
 		and (part:GetAttribute("Health") or 1) > 0
 end
@@ -469,6 +470,7 @@ end
 -- วางตัวละครให้ยืนบนพื้นจริง (ยิงเลเซอร์ลงหาพื้น) ไม่ลอยกลางอากาศ
 local groundParams = RaycastParams.new()
 groundParams.FilterType = Enum.RaycastFilterType.Exclude
+groundParams.RespectCanCollide = true   -- ไม่นับส่วนที่ทะลุได้ (เช่น กล่องขอบเขตโซน) เป็นพื้น
 local function onGround(cf, ignore)
 	local char = player.Character
 	local list = { char }
@@ -534,8 +536,9 @@ local hitSeq, hitGap = 0, CONFIG.HitInterval
 do
 	local confirmed = ReplicatedStorage:FindFirstChild("EggHitConfirmed")
 	if confirmed and confirmed:IsA("RemoteEvent") then
-		confirmed.OnClientEvent:Connect(function(_, seq)
+		confirmed.OnClientEvent:Connect(function(egg, seq, hp)
 			if type(seq) == "number" and seq > hitSeq then hitSeq = seq end   -- ใช้ลำดับต่อจากของเกม
+			if typeof(egg) == "Instance" and type(hp) == "number" and hp <= 0 then brokenEggs[egg] = os.clock() end
 		end)
 	end
 	local rejected = ReplicatedStorage:FindFirstChild("EggHitRejected")
@@ -562,6 +565,7 @@ local function breakEgg(egg, shouldStop, skipGems)
 	setSwing(false)    -- ปุ่ม Auto Swing ของเกม: ปิดไว้ตลอด (เราตีเอง)
 	if not root or not tweenTo(eggCFrame(egg, root), shouldStop) then return false end
 	log("ตีไข่:", egg:GetAttribute("EggType"), "HP", egg:GetAttribute("Health"))
+	local spot = eggCFrame(egg, root)   -- จุดยืน (บนพื้น)
 	local started, lastHit, lastGemCheck = os.clock(), 0, 0
 	while eggAlive(egg) and not shouldStop() and os.clock() - started < CONFIG.EggTimeout do
 		-- มีเพชรดรอปอยู่: เก็บเพชรก่อน แล้วค่อยกลับมาตีต่อ
@@ -569,10 +573,14 @@ local function breakEgg(egg, shouldStop, skipGems)
 			lastGemCheck = os.clock()
 			grabNearbyGems(shouldStop, CONFIG.GemRadius)
 		end
+		-- ถ้าหลุดจากจุดยืน (ไปเก็บเพชร/โดนดัน) ค่อยวางกลับ ไม่งั้นปล่อยให้ยืนตามแรงโน้มถ่วง เท้าติดพื้น
 		local _, r = getChar()
 		if r then
-			r.CFrame = eggCFrame(egg, r)
-			r.AssemblyLinearVelocity = Vector3.zero
+			local flat = Vector3.new(r.Position.X - spot.Position.X, 0, r.Position.Z - spot.Position.Z)
+			if flat.Magnitude > 2 or math.abs(r.Position.Y - spot.Position.Y) > 4 then
+				r.CFrame = spot
+				r.AssemblyLinearVelocity = Vector3.zero
+			end
 		end
 		if os.clock() - lastHit >= hitGap then
 			lastHit = os.clock()
@@ -582,14 +590,7 @@ local function breakEgg(egg, shouldStop, skipGems)
 				if tool then tool:Activate() end   -- เกมไม่มี EggHitRequest: ใช้การตีปกติแทน
 			end
 		end
-		task.wait()   -- เช็กทุกเฟรม: ไข่แตกปุ๊บ ไปต่อทันที
-	end
-	-- ไข่แตกแล้วเพชรจะดรอป: รอเพชรโผล่สักครู่ แล้วเก็บให้หมดก่อนไปไข่ใบต่อไป
-	if not skipGems and State.CollectGems and grabNearbyGems and not eggAlive(egg) then
-		local drops = workspace:FindFirstChild("EggGemDrops")
-		local t = os.clock()
-		while drops and #drops:GetChildren() == 0 and os.clock() - t < CONFIG.GemDropWait do task.wait() end
-		grabNearbyGems(shouldStop, CONFIG.GemRadius)
+		task.wait()   -- เช็กทุกเฟรม: ไข่แตกปุ๊บ ไปใบต่อไปทันที
 	end
 	return not eggAlive(egg)
 end
