@@ -24,7 +24,7 @@ local CONFIG = {
 	Title      = "FARM HUB",
 	LogoImage  = "",               -- เช่น "rbxassetid://1234567890" (ว่าง = แสดงคำว่า Logo)
 	ToggleKey  = Enum.KeyCode.RightControl,
-	HitDelay   = 0.05,             -- เวลาระหว่างการกดตีสำรองแต่ละครั้ง (วินาที)
+	HitInterval = 0.2,             -- ตีไข่ (ส่ง EggHitRequest) ทุกกี่วินาที (ถ้าโดนปฏิเสธจะช้าลงเอง)
 	EggTimeout = 20,               -- ตีไข่ใบเดียวนานสุดกี่วินาที แล้วข้ามไปใบอื่น
 	GemRadius  = 60,               -- เก็บเพชรเฉพาะที่อยู่ใกล้ตัวในรัศมีนี้ (studs)
 	FarmGemRadius = 30,            -- ตอนฟาร์ม: เก็บเฉพาะเพชรที่ตกใกล้ตัวมาก ๆ (ไม่เดินไปไกลจนเสียเวลา)
@@ -43,7 +43,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r24"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r25"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -524,31 +524,62 @@ end
 
 local grabNearbyGems   -- กำหนดในส่วนเก็บเพชรด้านล่าง
 
+-- ตีไข่ตรง ๆ แบบที่ MYHUB ทำ (ไม่ใช้ปุ่ม Auto Swing ของเกม จึงไม่ตีโดนไข่ใบอื่น)
+--   ReplicatedStorage.MasteryPickaxeSwing:FireServer()
+--   ReplicatedStorage.EggHitRequest:FireServer(ส่วน Egg ของไข่, ลำดับการตี)
+--   เกมตอบกลับ EggHitConfirmed(Egg, ลำดับ, เลือดที่เหลือ, ดาเมจ) / EggHitRejected
+local hitRemote = ReplicatedStorage:FindFirstChild("EggHitRequest")
+local swingRemote = ReplicatedStorage:FindFirstChild("MasteryPickaxeSwing")
+local hitSeq, hitGap = 0, CONFIG.HitInterval
+do
+	local confirmed = ReplicatedStorage:FindFirstChild("EggHitConfirmed")
+	if confirmed and confirmed:IsA("RemoteEvent") then
+		confirmed.OnClientEvent:Connect(function(_, seq)
+			if type(seq) == "number" and seq > hitSeq then hitSeq = seq end   -- ใช้ลำดับต่อจากของเกม
+		end)
+	end
+	local rejected = ReplicatedStorage:FindFirstChild("EggHitRejected")
+	if rejected and rejected:IsA("RemoteEvent") then
+		rejected.OnClientEvent:Connect(function(...)
+			hitGap = math.min(hitGap + 0.05, 1)   -- โดนปฏิเสธ: ตีช้าลงนิด
+			print("[FarmHub] ตีไม่ผ่าน (EggHitRejected):", ...)
+		end)
+	end
+end
+
+local function sendHit(eggPart)
+	if not hitRemote then return false end
+	hitSeq += 1
+	if swingRemote then swingRemote:FireServer() end
+	hitRemote:FireServer(eggPart, hitSeq)
+	return true
+end
+
 -- Tween ไปข้างไข่ แล้วตีจนแตก
 local function breakEgg(egg, shouldStop, skipGems)
 	local _, root = getChar()
-	getTool()          -- ถือที่ขุดไว้ (ปุ่ม Auto Swing จะโผล่)
-	setSwing(false)    -- ระหว่างเดินทางไปไข่: ปิด
+	getTool()          -- ถือที่ขุดไว้
+	setSwing(false)    -- ปุ่ม Auto Swing ของเกม: ปิดไว้ตลอด (เราตีเอง)
 	if not root or not tweenTo(eggCFrame(egg, root), shouldStop) then return false end
-	setSwing(true)     -- ถึงไข่เป้าหมายแล้ว: เปิด
 	log("ตีไข่:", egg:GetAttribute("EggType"), "HP", egg:GetAttribute("Health"))
-	local started, lastActivate = os.clock(), 0
+	local started, lastHit = os.clock(), 0
 	while eggAlive(egg) and not shouldStop() and os.clock() - started < CONFIG.EggTimeout do
 		local _, r = getChar()
 		if r then
 			r.CFrame = eggCFrame(egg, r)
 			r.AssemblyLinearVelocity = Vector3.zero
 		end
-		syncAutoSwing()
-		if os.clock() - lastActivate > CONFIG.HitDelay then
-			lastActivate = os.clock()
-			local tool = getTool()
-			if tool then tool:Activate() end   -- สำรอง เผื่อ Auto Swing ไม่ทำงาน
+		if os.clock() - lastHit >= hitGap then
+			lastHit = os.clock()
+			getTool()
+			if not sendHit(egg) then
+				local tool = getTool()
+				if tool then tool:Activate() end   -- เกมไม่มี EggHitRequest: ใช้การตีปกติแทน
+			end
 		end
 		task.wait()   -- เช็กทุกเฟรม: ไข่แตกปุ๊บ ไปต่อทันที
 	end
-	setSwing(false)        -- ไข่เป้าหมายแตก (หรือหยุด): ปิดทันที กันตีโดนไข่ใบอื่น
-	-- เพชรตกตอนไข่แตก: เก็บตอนนี้ (Auto Swing ปิดแล้ว)
+	-- เพชรตกตอนไข่แตก: เก็บเฉพาะที่ตกใกล้ตัว
 	if not skipGems and State.CollectGems and grabNearbyGems then grabNearbyGems(shouldStop, CONFIG.FarmGemRadius) end
 	return not eggAlive(egg)
 end
@@ -854,13 +885,6 @@ function Callbacks.AutoFarm(on)
 		if not stopped() then say("ตัวละครเกิดใหม่ เริ่มรอบใหม่") State.ReadyZone = nil end
 	end)
 	local waiting = true
-	-- คุม Auto Swing ตลอดที่ฟาร์ม (ระหว่าง Tween ด้วย) หยุดฟาร์มแล้วปิดให้
-	task.spawn(function()
-		while not stopped() do syncAutoSwing() task.wait(0.1) end
-		State.SwingWant = false
-		local t = os.clock()
-		while os.clock() - t < 3 and not State.AutoFarm do syncAutoSwing() task.wait(0.1) end
-	end)
 
 	while not stopped() do
 		if not getChar() then
