@@ -27,7 +27,9 @@ local CONFIG = {
 	HitDelay   = 0.15,             -- เวลาระหว่างการตีแต่ละครั้ง (วินาที)
 	EggTimeout = 20,               -- ตีไข่ใบเดียวนานสุดกี่วินาที แล้วข้ามไปใบอื่น
 	TweenSpeed = 300,              -- ความเร็ว Tween (studs/วินาที)
-	LiftDelay  = 3,                -- รอให้ยกไข่หลังไข่แตกนานสุดกี่วินาที
+	LiftWait   = 12,               -- รอสัตว์ออกจากไข่แล้วกด Steal นานสุดกี่วินาที
+	LiftRadius = 60,               -- หาปุ่ม Steal ในรัศมีนี้รอบไข่ที่ตีแตก
+	LiftPromptWords = { "steal", "pick", "carry", "grab", "lift" },
 	ToolKeyword = "Pickaxe",       -- ชื่อที่ขุด (Elite Pickaxe ฯลฯ)
 	GuardTimeout = 30,             -- รอผู้พิทักษ์ตีนานสุดกี่วินาที
 	KnockbackDist = 12,            -- ถูกดันออกไกลเกินนี้ = โดนตีแล้ว
@@ -294,34 +296,82 @@ local function breakEgg(egg, shouldStop)
 	return not eggAlive(egg)
 end
 
--- ยกไข่: ปกติเกมยกให้เองตอนไข่แตก (มีปุ่ม Drop โผล่) ถ้ายังไม่ยก จะลองกด ProximityPrompt ใกล้ตัว
-local function liftEgg(eggModel)
+-- ยกสัตว์: ไข่แตกแล้วจะมีสัตว์ออกมาพร้อมปุ่ม "E Steal" (ProximityPrompt)
+-- สคริปต์จะหา Prompt ที่เพิ่งเกิดใกล้ไข่ที่ตีแตก แล้ว Tween ไปกดให้
+local function promptPos(p)
+	local par = p.Parent
+	if not par then return end
+	if par:IsA("Attachment") then return par.WorldPosition end
+	if par:IsA("BasePart") then return par.Position end
+	if par:IsA("Model") then return par:GetPivot().Position end
+end
+
+local function isLiftPrompt(p)
+	local text = (p.ActionText .. " " .. p.ObjectText .. " " .. p.Name):lower()
+	for _, word in ipairs(CONFIG.LiftPromptWords) do
+		if text:find(word, 1, true) then return true end
+	end
+	return false
+end
+
+local function triggerPrompt(p)
+	if fireproximityprompt then
+		fireproximityprompt(p)
+		return
+	end
+	-- ไม่มี fireproximityprompt: กดปุ่มคีย์บอร์ดของ Prompt ค้างไว้ตามเวลาที่ต้องกดค้าง
+	local vim = game:GetService("VirtualInputManager")
+	vim:SendKeyEvent(true, p.KeyboardKeyCode, false, game)
+	task.wait(p.HoldDuration + 0.15)
+	vim:SendKeyEvent(false, p.KeyboardKeyCode, false, game)
+end
+
+-- เริ่มจด Prompt ที่เกิดใหม่ในแมพ (เรียกก่อนตีไข่) คืนค่า (รายการ, ฟังก์ชันหยุดจด)
+local function watchNewPrompts()
+	local list = {}
+	local conn = workspace.DescendantAdded:Connect(function(d)
+		if d:IsA("ProximityPrompt") then table.insert(list, d) end
+	end)
+	return list, function() conn:Disconnect() end
+end
+
+local function liftAnimal(eggPos, newPrompts, shouldStop)
 	local started = os.clock()
-	while os.clock() - started < CONFIG.LiftDelay do
-		if isCarrying() then log("ยกไข่แล้ว") return true end
-		task.wait(0.1)
-	end
-	local _, root = getChar()
-	if not root then return false end
-	if not fireproximityprompt then
-		log("ยังไม่ได้ยกไข่ และตัวรันนี้ไม่มี fireproximityprompt")
-		return false
-	end
-	for _, scope in ipairs({ eggModel, workspace:FindFirstChild("AnimalPickups") }) do
-		if scope then
-			for _, p in ipairs(scope:GetDescendants()) do
-				local part = p:IsA("ProximityPrompt") and p.Enabled and p.Parent
-				if part and part:IsA("BasePart") and (part.Position - root.Position).Magnitude < 20 then
-					log("กด Prompt:", p:GetFullName(), p.ActionText)
-					fireproximityprompt(p)
+	while os.clock() - started < CONFIG.LiftWait and not shouldStop() do
+		if isCarrying() then log("ยกสัตว์แล้ว") return true end
+
+		local candidates = table.clone(newPrompts)
+		local pickups = workspace:FindFirstChild("AnimalPickups")
+		if pickups then
+			for _, p in ipairs(pickups:GetDescendants()) do
+				if p:IsA("ProximityPrompt") then table.insert(candidates, p) end
+			end
+		end
+
+		local best, bestDist
+		for _, p in ipairs(candidates) do
+			if p.Parent and p.Enabled and isLiftPrompt(p) then
+				local pos = promptPos(p)
+				local d = pos and (pos - eggPos).Magnitude
+				if d and d < CONFIG.LiftRadius and (not bestDist or d < bestDist) then
+					best, bestDist = p, d
 				end
 			end
 		end
+
+		if best then
+			log("ยกสัตว์:", best:GetFullName(), best.ActionText, best.ObjectText)
+			local _, root = getChar()
+			local pos = promptPos(best)
+			if root and pos then tweenTo(besideCFrame(pos, root, 2), shouldStop) end
+			triggerPrompt(best)
+			task.wait(0.5)
+			if isCarrying() then log("ยกสัตว์แล้ว") return true end
+		end
+		task.wait(0.25)
 	end
-	task.wait(0.5)
-	local carrying = isCarrying()
-	log(carrying and "ยกไข่แล้ว" or "ยังไม่ได้ยกไข่")
-	return carrying
+	log("ยกสัตว์ไม่สำเร็จ (ไม่เจอปุ่ม Steal ใกล้ไข่)")
+	return false
 end
 
 -- Tween ไปหาผู้พิทักษ์ แล้วยืนติดตัวจนกว่าจะโดนตี
@@ -367,23 +417,20 @@ local function waitForGuardHit(guard, shouldStop)
 	return hit
 end
 
--- ขั้นเตรียม: ขุดไข่โซนที่ใกล้ที่สุด -> ยกไข่ -> พุ่งไปหาผู้พิทักษ์ให้ตี
+-- ขั้นเตรียม: ขุดไข่โซนที่ใกล้ที่สุด -> ยกสัตว์ที่ออกจากไข่ (Steal) -> พุ่งไปหาผู้พิทักษ์ให้ตี
 local function warmUp(shouldStop)
 	local egg, zoneName = nearestZoneEgg()
 	if not egg then log("ไม่พบไข่ใกล้ ๆ ข้ามขั้นผู้พิทักษ์") return end
 
 	log("ขั้นที่ 1: ขุดไข่ใน", zoneName)
-	local char = getChar()
-	local carryConn = State.Debug and char and char.ChildAdded:Connect(function(c)
-		log("ตัวละครได้ของ:", c.Name, c.ClassName)
-	end)
-	local eggModel = egg.Parent
+	local eggPos = egg.Position
+	local newPrompts, stopWatching = watchNewPrompts()
 	breakEgg(egg, shouldStop)
 	if not shouldStop() then
-		log("ขั้นที่ 2: ยกไข่")
-		liftEgg(eggModel)
+		log("ขั้นที่ 2: ยกสัตว์")
+		liftAnimal(eggPos, newPrompts, shouldStop)
 	end
-	if carryConn then carryConn:Disconnect() end
+	stopWatching()
 	if shouldStop() then return end
 
 	local guard = getGuard(zoneName)
