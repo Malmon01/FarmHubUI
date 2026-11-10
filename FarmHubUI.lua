@@ -1,65 +1,236 @@
 --[[
 	Farm Hub UI  (Roblox Lua / Luau)
 	- เมนูซ้าย: ฟาร์ม / หาตัว / สวน / เพิ่ม FPS
-	- หน้าฟาร์ม: เลือกโซน, เริ่มฟาร์ม, เก็บเพชร, เลือกไข่ (รายการไข่เปลี่ยนตามโซนที่เลือก)
-	- ลากหน้าต่างได้, กด RightControl เพื่อซ่อน/แสดง
-	ใส่โค้ดการทำงานจริงตรงจุดที่เขียนว่า TODO ในส่วน "Callbacks"
+	- หน้าฟาร์ม: เลือกโซน, เริ่มฟาร์ม, เก็บเพชร, เลือกไข่ (ดึงจากเกมจริง)
+	- กดโลโก้เพื่อย่อหน้าต่าง, กด RightControl เพื่อซ่อน/แสดง
+
+	โครงสร้างเกมที่ใช้:
+	  workspace.Build.ZoneBuilds.ZoneN.Eggs["<tier>: <ชื่อไข่>"].Egg
+	    Attributes: EggType, Health, MaxHealth, Broken, ZoneIndex
 ]]
 
-local Players      = game:GetService("Players")
-local UIS          = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
-local Lighting     = game:GetService("Lighting")
-local player       = Players.LocalPlayer
+local Players           = game:GetService("Players")
+local UIS               = game:GetService("UserInputService")
+local TweenService      = game:GetService("TweenService")
+local Lighting          = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local player            = Players.LocalPlayer
 
 ---------------------------------------------------------------------
--- CONFIG  (แก้ชื่อโซน / ไข่ / โลโก้ ตรงนี้)
+-- CONFIG
 ---------------------------------------------------------------------
 local CONFIG = {
 	Title      = "FARM HUB",
 	LogoImage  = "",               -- เช่น "rbxassetid://1234567890" (ว่าง = แสดงคำว่า Logo)
 	ToggleKey  = Enum.KeyCode.RightControl,
-	ZoneOrder  = { "โซนที่ 12", "โซนที่ 13" },
-	Zones = {
-		["โซนที่ 12"] = { "ไข่ธรรมดา", "ไข่ทอง", "ไข่เพชร" },
-		["โซนที่ 13"] = { "ไข่ไฟ", "ไข่น้ำแข็ง", "ไข่มังกร" },
-	},
+	HitDelay   = 0.15,             -- เวลาระหว่างการตีแต่ละครั้ง (วินาที)
+	EggTimeout = 20,               -- ตีไข่ใบเดียวนานสุดกี่วินาที แล้วข้ามไปใบอื่น
+	ZoneOrder  = {},
+	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
+local ALL_EGGS = "ทั้งหมด"
+
+-- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
+do
+	local build = workspace:FindFirstChild("Build")
+	local zoneBuilds = build and build:FindFirstChild("ZoneBuilds")
+	local nums = {}
+	if zoneBuilds then
+		for _, z in ipairs(zoneBuilds:GetChildren()) do
+			local n = tonumber(z.Name:match("^Zone(%d+)$"))
+			if n then table.insert(nums, n) end
+		end
+	end
+	table.sort(nums)   -- เรียง 1,2,3,...,13
+	for _, n in ipairs(nums) do
+		local name = "โซนที่ " .. n
+		table.insert(CONFIG.ZoneOrder, name)
+		CONFIG.ZoneModels[name] = zoneBuilds:FindFirstChild("Zone" .. n)
+	end
+	if #CONFIG.ZoneOrder == 0 then
+		CONFIG.ZoneOrder = { "ไม่พบโซน" }
+		warn("[FarmHub] ไม่พบ workspace.Build.ZoneBuilds")
+	end
+end
+
+-- รายชื่อชนิดไข่ในโซน (อ่านจากชื่อโมเดล "1: Forest Egg", "2: Rock Egg", ...)
+local function eggTypesOf(zoneName)
+	local list, found, seen = { ALL_EGGS }, {}, {}
+	local zone = CONFIG.ZoneModels[zoneName]
+	local folder = zone and zone:FindFirstChild("Eggs")
+	if folder then
+		for _, m in ipairs(folder:GetChildren()) do
+			local tier, name = m.Name:match("^(%d+):%s*(.+)$")
+			if name and not seen[name] then
+				seen[name] = true
+				table.insert(found, { tonumber(tier), name })
+			end
+		end
+	end
+	table.sort(found, function(a, b) return a[1] < b[1] end)
+	for _, f in ipairs(found) do table.insert(list, f[2]) end
+	return list
+end
 
 local State = {
 	Zone        = CONFIG.ZoneOrder[1],
-	Egg         = nil,
+	Egg         = ALL_EGGS,
 	AutoFarm    = false,
 	CollectGems = false,
+	Debug       = false,
 }
-State.Egg = CONFIG.Zones[State.Zone][1]
 
 ---------------------------------------------------------------------
--- Callbacks  (ใส่ logic ของเกมตรงนี้)
+-- Game helpers
+---------------------------------------------------------------------
+local function getChar()
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local hum  = char and char:FindFirstChildOfClass("Humanoid")
+	if root and hum and hum.Health > 0 then return char, root, hum end
+end
+
+-- ถืออาวุธ (ใช้ชิ้นที่ถืออยู่ ถ้าไม่ได้ถือจะหยิบชิ้นแรกในกระเป๋า)
+local function getTool()
+	local char, _, hum = getChar()
+	if not char then return end
+	local tool = char:FindFirstChildOfClass("Tool")
+	if tool then return tool end
+	local backpack = player:FindFirstChild("Backpack")
+	tool = backpack and backpack:FindFirstChildOfClass("Tool")
+	if tool then hum:EquipTool(tool) end
+	return tool
+end
+
+local function eggAlive(part)
+	return part and part.Parent ~= nil
+		and part:GetAttribute("Broken") ~= true
+		and (part:GetAttribute("Health") or 1) > 0
+end
+
+-- หาไข่ที่ใกล้ที่สุดในโซนที่เลือก ตามชนิดไข่ที่เลือก
+local function findEgg()
+	local zone = CONFIG.ZoneModels[State.Zone]
+	local folder = zone and zone:FindFirstChild("Eggs")
+	local _, root = getChar()
+	if not folder or not root then return end
+	local best, bestDist
+	for _, m in ipairs(folder:GetChildren()) do
+		local part = m:FindFirstChild("Egg")
+		if part and part:IsA("BasePart") and eggAlive(part) then
+			local eggType = part:GetAttribute("EggType")
+			if State.Egg == ALL_EGGS or eggType == State.Egg then
+				local d = (part.Position - root.Position).Magnitude
+				if not bestDist or d < bestDist then best, bestDist = part, d end
+			end
+		end
+	end
+	return best
+end
+
+-- ยืนข้างไข่ หันหน้าเข้าหาไข่
+local function standNextTo(egg, root)
+	local flat = Vector3.new(root.Position.X - egg.Position.X, 0, root.Position.Z - egg.Position.Z)
+	local dir = flat.Magnitude > 0.1 and flat.Unit or Vector3.new(0, 0, 1)
+	local dist = math.max(egg.Size.X, egg.Size.Z) / 2 + 2.5
+	local pos = egg.Position + dir * dist
+	root.CFrame = CFrame.lookAt(pos, Vector3.new(egg.Position.X, pos.Y, egg.Position.Z))
+	root.AssemblyLinearVelocity = Vector3.zero
+end
+
+---------------------------------------------------------------------
+-- Callbacks
 ---------------------------------------------------------------------
 local Callbacks = {}
 
 function Callbacks.ZoneChanged(zone)
-	print("[FarmHub] เลือกโซน:", zone)
+	if State.Debug then print("[FarmHub] เลือกโซน:", zone) end
 end
 
 function Callbacks.EggChanged(egg)
-	print("[FarmHub] เลือกไข่:", egg)
+	if State.Debug then print("[FarmHub] เลือกไข่:", egg) end
 end
 
+-- ฟาร์ม: วาร์ปไปข้างไข่ แล้วตีด้วยอาวุธที่ถือ (ใช้ระบบตีของเกมเอง)
 function Callbacks.AutoFarm(on)
 	State.AutoFarm = on
 	while State.AutoFarm do
-		-- TODO: โค้ดฟาร์มในโซน State.Zone
-		task.wait(0.5)
+		local egg = findEgg()
+		if egg then
+			if State.Debug then print("[FarmHub] ตีไข่:", egg:GetAttribute("EggType"), egg:GetAttribute("Health")) end
+			local started = os.clock()
+			while State.AutoFarm and eggAlive(egg) and os.clock() - started < CONFIG.EggTimeout do
+				local _, root = getChar()
+				local tool = getTool()
+				if root then standNextTo(egg, root) end
+				if tool then tool:Activate() end
+				task.wait(CONFIG.HitDelay)
+			end
+		else
+			task.wait(0.5)   -- ไม่มีไข่ รอเกิดใหม่
+		end
+		task.wait()
+	end
+end
+
+-- เก็บเพชร: แตะชิ้นส่วนที่ชื่อมี Gem/Diamond ที่เกิดขึ้นในแมพ (ต้องมี firetouchinterest)
+local gemConn
+local function isGem(inst)
+	if not inst:IsA("BasePart") then return false end
+	local n = inst.Name:lower()
+	return n:find("gem") ~= nil or n:find("diamond") ~= nil
+end
+
+local function touchGem(part)
+	local _, root = getChar()
+	if not root or not part.Parent then return end
+	if firetouchinterest then
+		firetouchinterest(root, part, 0)
+		task.wait()
+		firetouchinterest(root, part, 1)
 	end
 end
 
 function Callbacks.CollectGems(on)
 	State.CollectGems = on
-	while State.CollectGems do
-		-- TODO: โค้ดเก็บเพชร
-		task.wait(0.5)
+	if on then
+		if not firetouchinterest then warn("[FarmHub] ตัวรันนี้ไม่มี firetouchinterest เก็บเพชรอัตโนมัติไม่ได้") end
+		gemConn = gemConn or workspace.DescendantAdded:Connect(function(inst)
+			if State.CollectGems and isGem(inst) then
+				if State.Debug then print("[FarmHub] เจอเพชร:", inst:GetFullName()) end
+				task.delay(0.2, touchGem, inst)
+			end
+		end)
+	elseif gemConn then
+		gemConn:Disconnect()
+		gemConn = nil
+	end
+end
+
+-- โหมดดีบัก: พิมพ์ข้อมูล Remote ที่เกี่ยวกับการตีไข่/เพชร ลงช่อง F9
+local debugHooked = false
+function Callbacks.Debug(on)
+	State.Debug = on
+	if not on or debugHooked then return end
+	debugHooked = true
+	for _, name in ipairs({ "EggGemDropRemote", "EggHitConfirmed", "EggHitRejected", "EggHitLanded" }) do
+		local r = ReplicatedStorage:FindFirstChild(name)
+		if r and r:IsA("RemoteEvent") then
+			r.OnClientEvent:Connect(function(...)
+				if State.Debug then print("[FarmHub] <-", name, ...) end
+			end)
+		end
+	end
+	if hookmetamethod and getnamecallmethod then
+		local watch = { EggHitRequest = true, BatHitRequest = true, MasteryPickaxeSwing = true }
+		local old
+		old = hookmetamethod(game, "__namecall", function(self, ...)
+			if State.Debug and getnamecallmethod() == "FireServer"
+				and typeof(self) == "Instance" and watch[self.Name] then
+				print("[FarmHub] ->", self.Name, ...)
+			end
+			return old(self, ...)
+		end)
 	end
 end
 
@@ -228,7 +399,8 @@ local closeBtn = create("TextButton", {
 })
 corner(closeBtn, 6)
 closeBtn.MouseButton1Click:Connect(function()
-	State.AutoFarm, State.CollectGems = false, false
+	State.AutoFarm, State.Debug = false, false
+	Callbacks.CollectGems(false)
 	gui:Destroy()
 end)
 
@@ -418,20 +590,23 @@ local eggDropdown
 
 makeDropdown(farmPage, "เลือกโซน", CONFIG.ZoneOrder, State.Zone, function(zone)
 	State.Zone = zone
-	local eggs = CONFIG.Zones[zone] or {}
-	eggDropdown.SetOptions(eggs)
-	eggDropdown.Set(eggs[1])          -- เปลี่ยนไข่ตามโซนที่เลือก
+	eggDropdown.SetOptions(eggTypesOf(zone))   -- เปลี่ยนไข่ตามโซนที่เลือก
+	eggDropdown.Set(ALL_EGGS)
 	Callbacks.ZoneChanged(zone)
 end)
 
 makeToggle(farmPage, "เริ่มฟาร์ม", false, Callbacks.AutoFarm)
 makeToggle(farmPage, "เก็บเพชร", false, Callbacks.CollectGems)
 
-eggDropdown = makeDropdown(farmPage, "เลือกไข่", CONFIG.Zones[State.Zone], State.Egg, function(egg)
+eggDropdown = makeDropdown(farmPage, "เลือกไข่", eggTypesOf(State.Zone), State.Egg, function(egg)
 	State.Egg = egg
 	Callbacks.EggChanged(egg)
 end)
+makeButton(farmPage, "รีเฟรชรายชื่อไข่", function()
+	eggDropdown.SetOptions(eggTypesOf(State.Zone))
+end)
 makeNote(farmPage, "* รายการไข่จะเปลี่ยนตามโซนที่เลือก")
+makeToggle(farmPage, "โหมดดีบัก (ดูผลใน F9)", false, Callbacks.Debug)
 
 -- 2) หาตัว
 local findPage = addTab("หาตัว")
