@@ -42,7 +42,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r28"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r29"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -215,6 +215,49 @@ local function getAutoSwingBtn()
 	return autoSwingBtn
 end
 
+-- คุม Auto Swing ผ่านโค้ดของเกม (PlayerScripts.Client.Controllers.AutoSwingController) แทนการกดปุ่ม
+-- พิมพ์รายชื่อฟังก์ชันลง log ครั้งแรก (ไว้ดูว่าใช้ตัวไหนได้)
+local swingCtrl, swingCtrlTried = nil, false
+local function getSwingController()
+	if swingCtrlTried then return swingCtrl end
+	swingCtrlTried = true
+	local ps = player:FindFirstChild("PlayerScripts")
+	local client = ps and ps:FindFirstChild("Client")
+	local ctrls = client and client:FindFirstChild("Controllers")
+	local mod = ctrls and ctrls:FindFirstChild("AutoSwingController")
+	if not mod then print("[FarmHub] ไม่พบ AutoSwingController") return nil end
+	local ok, res = pcall(require, mod)
+	if not ok or type(res) ~= "table" then
+		print("[FarmHub] require AutoSwingController ไม่ได้:", res)
+		return nil
+	end
+	local keys = {}
+	for k, v in pairs(res) do table.insert(keys, tostring(k) .. "=" .. typeof(v) .. (type(v) ~= "function" and type(v) ~= "table" and ("(" .. tostring(v) .. ")") or "")) end
+	print("[FarmHub] AutoSwingController:", table.concat(keys, ", "))
+	swingCtrl = res
+	return res
+end
+
+-- สั่งเปิด/ปิดผ่าน AutoSwingController.SetOn(true/false) ของเกม แล้วเช็กด้วย IsOn()
+local function controllerIsOn()
+	local c = getSwingController()
+	if not c or type(c.IsOn) ~= "function" then return nil end
+	local ok, v = pcall(c.IsOn)
+	if ok and type(v) == "boolean" then return v end
+	ok, v = pcall(c.IsOn, c)
+	if ok and type(v) == "boolean" then return v end
+	return nil
+end
+
+local function controllerSetSwing(on)
+	local c = getSwingController()
+	if not c or type(c.SetOn) ~= "function" then return false end
+	pcall(c.SetOn, on)
+	if controllerIsOn() == on then return true end
+	pcall(c.SetOn, c, on)
+	return controllerIsOn() == on
+end
+
 -- สถานะ Auto Swing: เขียว = เปิด, แดง = ปิด
 -- 1) ถ้าปุ่มใช้รูปจาก ReplicatedStorage.Assets.AutoSwingState ดูจากชื่อรูป (On/Off ฯลฯ)
 -- 2) ไม่งั้นดูจากสี (เขียวมากกว่า = เปิด)
@@ -241,6 +284,8 @@ local function swingStateImages()
 end
 
 local function autoSwingIsOn(btn)
+	local byCtrl = controllerIsOn()   -- อ่านจากโค้ดเกมก่อน แม่นที่สุด
+	if byCtrl ~= nil then return byCtrl end
 	-- เกมเก็บสถานะใน AutoSwingColorAlpha: 0 = ปิด (แดง), มากกว่า 0 = เปิด (เขียว / กำลังกะพริบ)
 	local alpha = btn:FindFirstChild("AutoSwingColorAlpha")
 	if alpha and alpha:IsA("NumberValue") then
@@ -325,6 +370,11 @@ local function syncAutoSwing()
 	if on == nil then return end
 	if on == State.SwingWant then pressedFor = nil return end
 	-- กดแล้วปุ่มต้องใช้เวลาเปลี่ยนสี (ค่า alpha ค่อย ๆ ขยับ) รอก่อนค่อยกดซ้ำ
+	if controllerSetSwing(State.SwingWant) then   -- สั่งผ่านโค้ดเกมได้: ไม่ต้องกดปุ่ม
+		log(State.SwingWant and "เปิด Auto Swing (SetOn)" or "ปิด Auto Swing (SetOn)")
+		pressedFor = nil
+		return
+	end
 	if os.clock() - lastSwingPress < CONFIG.SwingPressGap then return end
 	if pressedFor == State.SwingWant then
 		-- กดไปแล้วแต่สถานะไม่เปลี่ยน: เปลี่ยนวิธีกด
@@ -336,47 +386,6 @@ local function syncAutoSwing()
 	if not pressButton(btn, swingMethod) then swingMethod = swingMethod % 4 + 1 end
 end
 
--- คุม Auto Swing ผ่านโค้ดของเกม (PlayerScripts.Client.Controllers.AutoSwingController) แทนการกดปุ่ม
--- พิมพ์รายชื่อฟังก์ชันลง log ครั้งแรก (ไว้ดูว่าใช้ตัวไหนได้)
-local swingCtrl, swingCtrlTried = nil, false
-local function getSwingController()
-	if swingCtrlTried then return swingCtrl end
-	swingCtrlTried = true
-	local ps = player:FindFirstChild("PlayerScripts")
-	local client = ps and ps:FindFirstChild("Client")
-	local ctrls = client and client:FindFirstChild("Controllers")
-	local mod = ctrls and ctrls:FindFirstChild("AutoSwingController")
-	if not mod then print("[FarmHub] ไม่พบ AutoSwingController") return nil end
-	local ok, res = pcall(require, mod)
-	if not ok or type(res) ~= "table" then
-		print("[FarmHub] require AutoSwingController ไม่ได้:", res)
-		return nil
-	end
-	local keys = {}
-	for k, v in pairs(res) do table.insert(keys, tostring(k) .. "=" .. typeof(v) .. (type(v) ~= "function" and type(v) ~= "table" and ("(" .. tostring(v) .. ")") or "")) end
-	print("[FarmHub] AutoSwingController:", table.concat(keys, ", "))
-	swingCtrl = res
-	return res
-end
-
--- ลองสั่งเปิด/ปิดผ่านฟังก์ชันของเกม คืน true ถ้าเรียกได้
-local function controllerSetSwing(on)
-	local c = getSwingController()
-	if not c then return false end
-	for _, name in ipairs({ "SetEnabled", "SetAutoSwing", "SetActive", "SetState", "Set" }) do
-		if type(c[name]) == "function" then
-			if pcall(c[name], c, on) then return true end
-			if pcall(c[name], on) then return true end
-		end
-	end
-	for _, name in ipairs(on and { "Enable", "Start", "Activate", "TurnOn" } or { "Disable", "Stop", "Deactivate", "TurnOff" }) do
-		if type(c[name]) == "function" then
-			if pcall(c[name], c) then return true end
-			if pcall(c[name]) then return true end
-		end
-	end
-	return false
-end
 
 -- ตั้งสถานะที่ต้องการ: ลองผ่านโค้ดเกมก่อน ถ้าไม่ได้ค่อยกดปุ่ม
 local function setSwing(on)
@@ -593,7 +602,7 @@ do
 	local rejected = ReplicatedStorage:FindFirstChild("EggHitRejected")
 	if rejected and rejected:IsA("RemoteEvent") then
 		rejected.OnClientEvent:Connect(function(...)
-			hitGap = math.min(hitGap + 0.05, 1)   -- โดนปฏิเสธ: ตีช้าลงนิด
+			-- ส่วนใหญ่โดนปฏิเสธเพราะไข่แตกไปแล้ว ไม่ต้องลดความเร็ว
 			print("[FarmHub] ตีไม่ผ่าน (EggHitRejected):", ...)
 		end)
 	end
