@@ -42,7 +42,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r19"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r20"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -198,35 +198,108 @@ local function getAutoSwingBtn()
 	return autoSwingBtn
 end
 
--- คืนค่า true = เปิด (แดง), false = ปิด (เขียว), nil = ดูไม่ออก
+-- สถานะ Auto Swing: เขียว = เปิด, แดง = ปิด
+-- 1) ถ้าปุ่มใช้รูปจาก ReplicatedStorage.Assets.AutoSwingState ดูจากชื่อรูป (On/Off ฯลฯ)
+-- 2) ไม่งั้นดูจากสี (เขียวมากกว่า = เปิด)
+-- คืนค่า true = เปิด, false = ปิด, nil = ดูไม่ออก
+local function swingStateImages()
+	local map = {}
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
+	local folder = assets and assets:FindFirstChild("AutoSwingState")
+	if not folder then return map end
+	for _, d in ipairs(folder:GetDescendants()) do
+		local id = (d:IsA("ImageLabel") or d:IsA("ImageButton")) and d.Image
+			or (d:IsA("Decal") or d:IsA("Texture")) and d.Texture
+			or d:IsA("StringValue") and d.Value
+		if id and id ~= "" then
+			local n = d.Name:lower()
+			if n:find("off") or n:find("disable") or n:find("inactive") or n:find("red") then
+				map[id] = false
+			elseif n:find("on") or n:find("enable") or n:find("active") or n:find("green") then
+				map[id] = true
+			end
+		end
+	end
+	return map
+end
+
 local function autoSwingIsOn(btn)
+	local list = btn:GetDescendants()
+	table.insert(list, btn)
+	local images = swingStateImages()
+	for _, d in ipairs(list) do
+		if (d:IsA("ImageLabel") or d:IsA("ImageButton")) and d.Visible and images[d.Image] ~= nil then
+			return images[d.Image]
+		end
+	end
 	local reds, greens = 0, 0
 	local function judge(c)
 		if c.R - c.G > 0.25 then reds += 1 elseif c.G - c.R > 0.25 then greens += 1 end
 	end
-	local list = btn:GetDescendants()
-	table.insert(list, btn)
 	for _, d in ipairs(list) do
 		if d:IsA("GuiObject") and d.Visible then
 			if d.BackgroundTransparency < 1 then judge(d.BackgroundColor3) end
 			if (d:IsA("ImageLabel") or d:IsA("ImageButton")) and d.ImageTransparency < 1 then judge(d.ImageColor3) end
+			if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.TextTransparency < 1 then judge(d.TextColor3) end
 		elseif d:IsA("UIGradient") and d.Enabled then
 			for _, k in ipairs(d.Color.Keypoints) do judge(k.Value) end
+		elseif d:IsA("UIStroke") and d.Enabled then
+			judge(d.Color)
 		end
 	end
-	if reds > greens then return true end
-	if greens > reds then return false end
+	if greens > reds then return true end
+	if reds > greens then return false end
 	return nil
+end
+
+-- บันทึกโครงสร้างปุ่ม Auto Swing ลงไฟล์ FarmHub_autoswing.txt (ไว้ตรวจว่าเกมแสดงสถานะยังไง)
+local function dumpAutoSwing(btn)
+	if not writefile then return end
+	local out = { "VERSION " .. VERSION, "isOn = " .. tostring(autoSwingIsOn(btn)) }
+	local function c3(c) return string.format("(%.2f,%.2f,%.2f)", c.R, c.G, c.B) end
+	local list = btn:GetDescendants()
+	table.insert(list, 1, btn)
+	for _, d in ipairs(list) do
+		local s = d:GetFullName() .. " [" .. d.ClassName .. "]"
+		if d:IsA("GuiObject") then s ..= " vis=" .. tostring(d.Visible) .. " bg=" .. c3(d.BackgroundColor3) .. " bgT=" .. d.BackgroundTransparency end
+		if d:IsA("ImageLabel") or d:IsA("ImageButton") then s ..= " img=" .. d.Image .. " imgC=" .. c3(d.ImageColor3) end
+		if d:IsA("TextLabel") or d:IsA("TextButton") then s ..= " tc=" .. c3(d.TextColor3) end
+		if d:IsA("UIGradient") then
+			local k = {} for _, p in ipairs(d.Color.Keypoints) do k[#k + 1] = c3(p.Value) end
+			s ..= " grad=" .. table.concat(k, ",")
+		end
+		if d:IsA("UIStroke") then s ..= " stroke=" .. c3(d.Color) end
+		if d:IsA("ValueBase") then s ..= " value=" .. tostring(d.Value) end
+		table.insert(out, s)
+	end
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
+	local folder = assets and assets:FindFirstChild("AutoSwingState")
+	table.insert(out, "--- AutoSwingState")
+	if folder then
+		for _, d in ipairs(folder:GetDescendants()) do
+			local s = d:GetFullName() .. " [" .. d.ClassName .. "]"
+			if d:IsA("ImageLabel") or d:IsA("ImageButton") then s ..= " img=" .. d.Image end
+			if d:IsA("Decal") or d:IsA("Texture") then s ..= " tex=" .. d.Texture end
+			if d:IsA("ValueBase") then s ..= " value=" .. tostring(d.Value) end
+			table.insert(out, s)
+		end
+	end
+	pcall(appendfile or writefile, "FarmHub_autoswing.txt", table.concat(out, "\n") .. "\n\n")
 end
 
 -- คุม Auto Swing ของเกมให้ตรงกับที่ต้องการ (State.SwingWant)
 --   เปิด = ยืนติดไข่ที่กำลังจะตีแล้ว, ปิด = ระหว่างเดินทาง / หลังไข่แตก
 -- ปุ่มกะพริบสีได้ จึงกดเฉพาะเมื่อสีไม่ตรงกับที่ต้องการต่อเนื่อง CONFIG.SwingConfirm วิ
+local lastObserved, dumps = "init", 0
 local lastSwingPress, mismatchSince = 0, nil
 local function syncAutoSwing()
 	local btn = getAutoSwingBtn()
 	if not btn or not isShown(btn) then mismatchSince = nil return end
 	local on = autoSwingIsOn(btn)
+	if on ~= lastObserved and dumps < 12 then   -- สถานะเปลี่ยน: บันทึกลงไฟล์ไว้ตรวจ
+		lastObserved, dumps = on, dumps + 1
+		dumpAutoSwing(btn)
+	end
 	if on == nil or on == State.SwingWant then mismatchSince = nil return end
 	mismatchSince = mismatchSince or os.clock()
 	if os.clock() - mismatchSince < CONFIG.SwingConfirm then return end
