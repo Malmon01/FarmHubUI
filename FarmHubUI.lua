@@ -31,6 +31,7 @@ local CONFIG = {
 	TeleportRetries = 3,           -- วาร์ปซ้ำกี่ครั้งถ้าเกมดึงตัวกลับ
 	TeleportVia = { [13] = 12 },   -- โซนที่ไกลเกินวาร์ปตรง: วาร์ปไปโซนนี้ก่อน แล้ว Tween ต่อ
 	RagdollWait = 3,               -- หลังโดนผู้พิทักษ์ตี รอตัวละครลุกขึ้นนานสุดกี่วินาที
+	SwingGreenTime = 1.5,          -- ปุ่ม Auto Swing ต้องเป็นสีเขียวต่อเนื่องนานเท่านี้ถึงจะกดเปิด
 	TweenSpeed = 300,              -- ความเร็ว Tween (studs/วินาที)
 	LiftWait   = 12,               -- รอสัตว์ออกจากไข่แล้วกด Steal นานสุดกี่วินาที
 	LiftRadius = 60,               -- หาปุ่ม Steal ในรัศมีนี้รอบไข่ที่ตีแตก
@@ -41,7 +42,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r14"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r15"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -217,18 +218,28 @@ local function autoSwingIsOn(btn)
 	return nil
 end
 
--- ให้ Auto Swing เปิดค้าง (แดง) ตลอด: ถ้าเป็นสีเขียวจะกดเปิด
-local lastSwingPress = 0
+-- ให้ Auto Swing เปิดค้าง (แดง) ตลอด
+-- ปุ่มของเกมกะพริบสีได้ชั่วคราว จึงกดเปิดเฉพาะเมื่อเห็นสีเขียวต่อเนื่องนาน CONFIG.SwingGreenTime วิ
+-- (กันไม่ให้ไปกดตอนมันเปิดอยู่แล้ว ซึ่งจะกลายเป็นปิด)
+local lastSwingPress, greenSince = 0, nil
 local function ensureAutoSwing()
 	local char = getChar()
 	if not char then return end
 	local btn = getAutoSwingBtn()
-	if not btn or not isShown(btn) then return end
+	if not btn or not isShown(btn) then greenSince = nil return end
 	local on = autoSwingIsOn(btn)
-	if on == true then State.AutoSwingChar = char return end
-	if on == nil and State.AutoSwingChar == char then return end   -- ดูสีไม่ออก: กดครั้งเดียวต่อการเกิด
-	if os.clock() - lastSwingPress < 1 then return end            -- กันกดรัวจนเปิด-ปิดสลับ
-	lastSwingPress = os.clock()
+	if on == true then
+		State.AutoSwingChar, greenSince = char, nil
+		return
+	end
+	if on == nil then
+		if State.AutoSwingChar == char then return end   -- ดูสีไม่ออก: กดครั้งเดียวต่อการเกิด
+	else
+		greenSince = greenSince or os.clock()
+		if os.clock() - greenSince < CONFIG.SwingGreenTime then return end
+	end
+	if os.clock() - lastSwingPress < 3 then return end   -- กดแล้วรอผลอย่างน้อย 3 วิ
+	lastSwingPress, greenSince = os.clock(), nil
 	log("เปิด Auto Swing")
 	pressButton(btn)
 	State.AutoSwingChar = char
@@ -293,8 +304,31 @@ local function besideCFrame(targetPos, root, gap)
 	return CFrame.lookAt(pos, Vector3.new(targetPos.X, pos.Y, targetPos.Z))
 end
 
+-- วางตัวละครให้ยืนบนพื้นจริง (ยิงเลเซอร์ลงหาพื้น) ไม่ลอยกลางอากาศ
+local groundParams = RaycastParams.new()
+groundParams.FilterType = Enum.RaycastFilterType.Exclude
+local function onGround(cf, ignore)
+	local char = player.Character
+	local list = { char }
+	if ignore then table.insert(list, ignore) end
+	local gems = workspace:FindFirstChild("EggGemDrops")
+	if gems then table.insert(list, gems) end
+	groundParams.FilterDescendantsInstances = list
+	local hit = workspace:Raycast(cf.Position + Vector3.new(0, 8, 0), Vector3.new(0, -80, 0), groundParams)
+	if not hit then return cf end
+	local _, root, hum = getChar()
+	local height = 3
+	if hum and root then
+		height = root.Size.Y / 2 + (hum.RigType == Enum.HumanoidRigType.R6 and 2 or hum.HipHeight)
+	end
+	return cf + Vector3.new(0, hit.Position.Y + height - cf.Position.Y, 0)
+end
+
 local function eggCFrame(egg, root)
-	return besideCFrame(egg.Position, root, math.max(egg.Size.X, egg.Size.Z) / 2 + 2.5)
+	local cf = besideCFrame(egg.Position, root, math.max(egg.Size.X, egg.Size.Z) / 2 + 2.5)
+	-- ไม่นับไข่และรังเป็นพื้น (ข้ามทั้งโฟลเดอร์ Eggs ของโซน)
+	local eggsFolder = egg.Parent and egg.Parent.Parent
+	return onGround(cf, eggsFolder)
 end
 
 -- เคลื่อนที่แบบ Tween ด้วยความเร็ว CONFIG.TweenSpeed (studs/วินาที)
@@ -491,13 +525,13 @@ local function waitForGuardHit(guard, shouldStop)
 	end))
 
 	local stop = function() return hit or shouldStop() end
-	tweenTo(besideCFrame(guard:GetPivot().Position, root, 3), stop)
+	tweenTo(onGround(besideCFrame(guard:GetPivot().Position, root, 3), guard), stop)
 
 	local started = os.clock()
 	while not stop() and guard.Parent and os.clock() - started < CONFIG.GuardTimeout do
 		local _, r = getChar()
 		if not r then hit = true break end
-		local target = besideCFrame(guard:GetPivot().Position, r, 3)
+		local target = onGround(besideCFrame(guard:GetPivot().Position, r, 3), guard)
 		r.CFrame = target
 		r.AssemblyLinearVelocity = Vector3.zero
 		task.wait()   -- เช็กทุกเฟรม
@@ -528,7 +562,7 @@ local function warmUp(shouldStop)
 	if shouldStop() then return end
 
 	local guard = getGuard(zoneName)
-	if not guard then say("ไม่พบผู้พิทักษ์ใน", zoneName) return end
+	if not guard then say("ไม่พบผู้พิทักษ์ใน", zoneName) return zoneName end
 	say("ขั้นที่ 3: พุ่งไปหาผู้พิทักษ์", guard.Name)
 	local hit = waitForGuardHit(guard, shouldStop)
 	say(hit and "ผู้พิทักษ์ตีแล้ว" or "หมดเวลารอผู้พิทักษ์")
@@ -550,6 +584,7 @@ local function warmUp(shouldStop)
 		if hum and not ragdollStates[hum:GetState()] and not hum.PlatformStand then break end
 		task.wait()
 	end
+	return zoneName
 end
 
 -- ตำแหน่งปลายทางในโซน: ข้างไข่ (ถ้าเห็นไข่แล้ว) หรือกลางโซน
@@ -625,11 +660,15 @@ function Callbacks.AutoFarm(on)
 			task.wait(0.5)
 		elseif State.ReadyZone ~= State.Zone then
 			local target = State.Zone
-			warmUp(stopped)
+			local warmZone = warmUp(stopped)
 			if stopped() then break end
 			State.ReadyZone = target
-			say("ขั้นที่ 4: ไปฟาร์มที่", target)
-			goToZone(target, stopped)   -- วาร์ป (โซนไกลวาร์ปผ่านโซนก่อนหน้า) แล้วเริ่มฟาร์ม
+			if warmZone == target then
+				say("ขั้นที่ 4: อยู่ใน", target, "แล้ว เริ่มฟาร์มเลย")
+			else
+				say("ขั้นที่ 4: ไปฟาร์มที่", target)
+				goToZone(target, stopped)   -- วาร์ป (โซนไกลวาร์ปผ่านโซนก่อนหน้า) แล้วเริ่มฟาร์ม
+			end
 		else
 			local egg = findEgg(State.Zone, State.Egg)
 			if egg then
@@ -695,7 +734,7 @@ grabNearbyGems = function(shouldStop)
 		local part = gemPart(best)
 		if not gemLogged then gemLogged = true describeGem(best) end
 		if got == 0 then say("เก็บเพชร: ไปหาเพชรที่ตก") end
-		tweenTo(CFrame.new(part.Position), shouldStop)
+		tweenTo(onGround(CFrame.new(part.Position)), shouldStop)
 		root.AssemblyLinearVelocity = Vector3.zero
 		if firetouchinterest and part.Parent then
 			firetouchinterest(root, part, 0)
@@ -706,7 +745,7 @@ grabNearbyGems = function(shouldStop)
 		-- ยืนบนเพชรจนเพชรหาย (ไม่เกิน GemStay วิ)
 		local t = os.clock()
 		while best.Parent and os.clock() - t < CONFIG.GemStay do
-			if part.Parent then root.CFrame = CFrame.new(part.Position) end
+			if part.Parent then root.CFrame = onGround(CFrame.new(part.Position)) end
 			task.wait()
 		end
 		if best.Parent then
