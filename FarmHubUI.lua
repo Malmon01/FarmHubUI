@@ -13,6 +13,7 @@ local Players           = game:GetService("Players")
 local UIS               = game:GetService("UserInputService")
 local TweenService      = game:GetService("TweenService")
 local Lighting          = game:GetService("Lighting")
+local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local player            = Players.LocalPlayer
 
@@ -25,6 +26,10 @@ local CONFIG = {
 	ToggleKey  = Enum.KeyCode.RightControl,
 	HitDelay   = 0.15,             -- เวลาระหว่างการตีแต่ละครั้ง (วินาที)
 	EggTimeout = 20,               -- ตีไข่ใบเดียวนานสุดกี่วินาที แล้วข้ามไปใบอื่น
+	TweenSpeed = 300,              -- ความเร็ว Tween (studs/วินาที)
+	LiftDelay  = 0.6,              -- รอหลังไข่แตกก่อนยกไข่ (วินาที)
+	GuardTimeout = 30,             -- รอผู้พิทักษ์ตีนานสุดกี่วินาที
+	KnockbackDist = 12,            -- ถูกดันออกไกลเกินนี้ = โดนตีแล้ว
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
@@ -78,6 +83,8 @@ local State = {
 	AutoFarm    = false,
 	CollectGems = false,
 	Debug       = false,
+	FarmRun     = 0,
+	ReadyZone   = nil,
 }
 
 ---------------------------------------------------------------------
@@ -108,9 +115,13 @@ local function eggAlive(part)
 		and (part:GetAttribute("Health") or 1) > 0
 end
 
--- หาไข่ที่ใกล้ที่สุดในโซนที่เลือก ตามชนิดไข่ที่เลือก
-local function findEgg()
-	local zone = CONFIG.ZoneModels[State.Zone]
+local function log(...)
+	if State.Debug then print("[FarmHub]", ...) end
+end
+
+-- หาไข่ที่ใกล้ที่สุดในโซน (filter = ชื่อชนิดไข่ หรือ ALL_EGGS) คืนค่า (ไข่, ระยะ)
+local function findEgg(zoneName, filter)
+	local zone = CONFIG.ZoneModels[zoneName]
 	local folder = zone and zone:FindFirstChild("Eggs")
 	local _, root = getChar()
 	if not folder or not root then return end
@@ -118,24 +129,179 @@ local function findEgg()
 	for _, m in ipairs(folder:GetChildren()) do
 		local part = m:FindFirstChild("Egg")
 		if part and part:IsA("BasePart") and eggAlive(part) then
-			local eggType = part:GetAttribute("EggType")
-			if State.Egg == ALL_EGGS or eggType == State.Egg then
+			if filter == ALL_EGGS or part:GetAttribute("EggType") == filter then
 				local d = (part.Position - root.Position).Magnitude
 				if not bestDist or d < bestDist then best, bestDist = part, d end
 			end
 		end
 	end
-	return best
+	return best, bestDist
 end
 
--- ยืนข้างไข่ หันหน้าเข้าหาไข่
-local function standNextTo(egg, root)
-	local flat = Vector3.new(root.Position.X - egg.Position.X, 0, root.Position.Z - egg.Position.Z)
+-- ไข่ที่ใกล้ที่สุดจากทุกโซน = โซนที่ใกล้ที่สุด คืนค่า (ไข่, ชื่อโซน)
+local function nearestZoneEgg()
+	local bestEgg, bestZone, bestDist
+	for zoneName in pairs(CONFIG.ZoneModels) do
+		local egg, d = findEgg(zoneName, ALL_EGGS)
+		if egg and (not bestDist or d < bestDist) then
+			bestEgg, bestZone, bestDist = egg, zoneName, d
+		end
+	end
+	return bestEgg, bestZone
+end
+
+-- ผู้พิทักษ์ของโซน = โมเดลในโซนที่มี Attribute "ChaseState" (เช่น Zone1.Chicken)
+local function getGuard(zoneName)
+	local zone = CONFIG.ZoneModels[zoneName]
+	if not zone then return end
+	for _, c in ipairs(zone:GetChildren()) do
+		if c:IsA("Model") and c:GetAttribute("ChaseState") ~= nil then return c end
+	end
+end
+
+-- ตำแหน่งยืนข้างเป้าหมาย หันหน้าเข้าหา
+local function besideCFrame(targetPos, root, gap)
+	local flat = Vector3.new(root.Position.X - targetPos.X, 0, root.Position.Z - targetPos.Z)
 	local dir = flat.Magnitude > 0.1 and flat.Unit or Vector3.new(0, 0, 1)
-	local dist = math.max(egg.Size.X, egg.Size.Z) / 2 + 2.5
-	local pos = egg.Position + dir * dist
-	root.CFrame = CFrame.lookAt(pos, Vector3.new(egg.Position.X, pos.Y, egg.Position.Z))
-	root.AssemblyLinearVelocity = Vector3.zero
+	local pos = targetPos + dir * gap
+	return CFrame.lookAt(pos, Vector3.new(targetPos.X, pos.Y, targetPos.Z))
+end
+
+local function eggCFrame(egg, root)
+	return besideCFrame(egg.Position, root, math.max(egg.Size.X, egg.Size.Z) / 2 + 2.5)
+end
+
+-- เคลื่อนที่แบบ Tween ด้วยความเร็ว CONFIG.TweenSpeed (studs/วินาที)
+local function tweenTo(cf, shouldStop)
+	local _, root = getChar()
+	if not root then return false end
+	local t = (root.Position - cf.Position).Magnitude / CONFIG.TweenSpeed
+	if t < 0.05 then root.CFrame = cf return true end
+	local hold = RunService.Heartbeat:Connect(function()
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+	end)
+	local tween = TweenService:Create(root, TweenInfo.new(t, Enum.EasingStyle.Linear), { CFrame = cf })
+	local done = false
+	local c = tween.Completed:Connect(function() done = true end)
+	tween:Play()
+	while not done and not (shouldStop and shouldStop()) and root.Parent do task.wait() end
+	if not done then tween:Cancel() end
+	c:Disconnect()
+	hold:Disconnect()
+	return done
+end
+
+-- Tween ไปข้างไข่ แล้วตีจนแตก
+local function breakEgg(egg, shouldStop)
+	local _, root = getChar()
+	if not root or not tweenTo(eggCFrame(egg, root), shouldStop) then return false end
+	log("ตีไข่:", egg:GetAttribute("EggType"), "HP", egg:GetAttribute("Health"))
+	local started = os.clock()
+	while eggAlive(egg) and not shouldStop() and os.clock() - started < CONFIG.EggTimeout do
+		local _, r = getChar()
+		local tool = getTool()
+		if r then
+			r.CFrame = eggCFrame(egg, r)
+			r.AssemblyLinearVelocity = Vector3.zero
+		end
+		if tool then tool:Activate() end
+		task.wait(CONFIG.HitDelay)
+	end
+	return not eggAlive(egg)
+end
+
+-- ยกไข่: ถ้ามี ProximityPrompt ใกล้ตัว (ในไข่ที่แตก หรือใน AnimalPickups) จะกดให้
+local function liftEgg(eggModel)
+	task.wait(CONFIG.LiftDelay)
+	local _, root = getChar()
+	if not root then return end
+	if not fireproximityprompt then
+		log("ตัวรันนี้ไม่มี fireproximityprompt (ถ้ายกไข่อัตโนมัติอยู่แล้วก็ไม่เป็นไร)")
+		return
+	end
+	for _, scope in ipairs({ eggModel, workspace:FindFirstChild("AnimalPickups") }) do
+		if scope then
+			for _, p in ipairs(scope:GetDescendants()) do
+				local part = p:IsA("ProximityPrompt") and p.Enabled and p.Parent
+				if part and part:IsA("BasePart") and (part.Position - root.Position).Magnitude < 20 then
+					log("กด Prompt:", p:GetFullName(), p.ActionText)
+					fireproximityprompt(p)
+				end
+			end
+		end
+	end
+end
+
+-- Tween ไปหาผู้พิทักษ์ แล้วยืนติดตัวจนกว่าจะโดนตี
+local function waitForGuardHit(guard, shouldStop)
+	local _, root, hum = getChar()
+	if not root then return false end
+	local hit, conns = false, {}
+	local lastHealth = hum.Health
+	table.insert(conns, hum.HealthChanged:Connect(function(h)
+		if h < lastHealth then log("เลือดลด:", lastHealth, "->", h) hit = true end
+		lastHealth = h
+	end))
+	table.insert(conns, hum.Died:Connect(function() hit = true end))
+	local fling = ReplicatedStorage:FindFirstChild("CatchFlingRemote")
+	if fling and fling:IsA("RemoteEvent") then
+		table.insert(conns, fling.OnClientEvent:Connect(function(...)
+			log("<- CatchFlingRemote", ...)
+			hit = true
+		end))
+	end
+	table.insert(conns, guard:GetAttributeChangedSignal("ChaseState"):Connect(function()
+		log("ผู้พิทักษ์ ChaseState =", guard:GetAttribute("ChaseState"))
+	end))
+
+	local stop = function() return hit or shouldStop() end
+	tweenTo(besideCFrame(guard:GetPivot().Position, root, 3), stop)
+
+	local started = os.clock()
+	while not stop() and guard.Parent and os.clock() - started < CONFIG.GuardTimeout do
+		local _, r = getChar()
+		if not r then hit = true break end
+		local target = besideCFrame(guard:GetPivot().Position, r, 3)
+		r.CFrame = target
+		r.AssemblyLinearVelocity = Vector3.zero
+		task.wait(0.1)
+		-- ถูกตีจนกระเด็น / ถูกย้ายตำแหน่ง
+		if r.Parent and (r.Position - target.Position).Magnitude > CONFIG.KnockbackDist then
+			log("ถูกกระเด็นออกจากจุดที่ยืน")
+			hit = true
+		end
+	end
+	for _, c in ipairs(conns) do c:Disconnect() end
+	return hit
+end
+
+-- ขั้นเตรียม: ขุดไข่โซนที่ใกล้ที่สุด -> ยกไข่ -> พุ่งไปหาผู้พิทักษ์ให้ตี
+local function warmUp(shouldStop)
+	local egg, zoneName = nearestZoneEgg()
+	if not egg then log("ไม่พบไข่ใกล้ ๆ ข้ามขั้นผู้พิทักษ์") return end
+
+	log("ขั้นที่ 1: ขุดไข่ใน", zoneName)
+	local char = getChar()
+	local carryConn = State.Debug and char and char.ChildAdded:Connect(function(c)
+		log("ตัวละครได้ของ:", c.Name, c.ClassName)
+	end)
+	local eggModel = egg.Parent
+	breakEgg(egg, shouldStop)
+	if not shouldStop() then
+		log("ขั้นที่ 2: ยกไข่")
+		liftEgg(eggModel)
+	end
+	if carryConn then carryConn:Disconnect() end
+	if shouldStop() then return end
+
+	local guard = getGuard(zoneName)
+	if not guard then log("ไม่พบผู้พิทักษ์ใน", zoneName) return end
+	log("ขั้นที่ 3: พุ่งไปหาผู้พิทักษ์", guard.Name)
+	local hit = waitForGuardHit(guard, shouldStop)
+	log(hit and "ผู้พิทักษ์ตีแล้ว" or "หมดเวลารอผู้พิทักษ์")
+	task.wait(1)
+	if not getChar() then player.CharacterAdded:Wait() task.wait(1) end   -- ถ้าตาย รอเกิดใหม่
 end
 
 ---------------------------------------------------------------------
@@ -144,30 +310,38 @@ end
 local Callbacks = {}
 
 function Callbacks.ZoneChanged(zone)
-	if State.Debug then print("[FarmHub] เลือกโซน:", zone) end
+	log("เลือกโซน:", zone)
 end
 
 function Callbacks.EggChanged(egg)
-	if State.Debug then print("[FarmHub] เลือกไข่:", egg) end
+	log("เลือกไข่:", egg)
 end
 
--- ฟาร์ม: วาร์ปไปข้างไข่ แล้วตีด้วยอาวุธที่ถือ (ใช้ระบบตีของเกมเอง)
+-- ฟาร์ม: ทุกครั้งที่เริ่ม/เปลี่ยนโซน จะทำขั้นเตรียม (warmUp) ก่อน
+-- แล้วค่อย Tween ไปโซนที่เลือก ตีไข่ที่ใกล้ที่สุดไปเรื่อย ๆ
 function Callbacks.AutoFarm(on)
 	State.AutoFarm = on
-	while State.AutoFarm do
-		local egg = findEgg()
-		if egg then
-			if State.Debug then print("[FarmHub] ตีไข่:", egg:GetAttribute("EggType"), egg:GetAttribute("Health")) end
-			local started = os.clock()
-			while State.AutoFarm and eggAlive(egg) and os.clock() - started < CONFIG.EggTimeout do
-				local _, root = getChar()
-				local tool = getTool()
-				if root then standNextTo(egg, root) end
-				if tool then tool:Activate() end
-				task.wait(CONFIG.HitDelay)
-			end
+	State.FarmRun += 1
+	State.ReadyZone = nil
+	if not on then return end
+	local run = State.FarmRun
+	local function stopped() return not State.AutoFarm or State.FarmRun ~= run end
+
+	while not stopped() do
+		if not getChar() then
+			task.wait(0.5)
+		elseif State.ReadyZone ~= State.Zone then
+			local target = State.Zone
+			warmUp(stopped)
+			State.ReadyZone = target
+			log("ขั้นที่ 4: ไปฟาร์มที่", target)
 		else
-			task.wait(0.5)   -- ไม่มีไข่ รอเกิดใหม่
+			local egg = findEgg(State.Zone, State.Egg)
+			if egg then
+				breakEgg(egg, function() return stopped() or State.ReadyZone ~= State.Zone end)
+			else
+				task.wait(0.5)   -- ไม่มีไข่ รอเกิดใหม่
+			end
 		end
 		task.wait()
 	end
@@ -232,59 +406,6 @@ function Callbacks.Debug(on)
 			return old(self, ...)
 		end)
 	end
-end
-
--- Ragdoll: ปิดข้อต่อ (Motor6D) แล้วใส่ BallSocket แทน ให้ตัวละครล้มตามฟิสิกส์
-local ragdoll = { joints = {}, collide = {}, char = nil }
-
-local function unragdoll()
-	for _, j in ipairs(ragdoll.joints) do
-		j.socket:Destroy(); j.a0:Destroy(); j.a1:Destroy()
-		if j.motor.Parent then j.motor.Enabled = true end
-	end
-	for part, was in pairs(ragdoll.collide) do
-		if part.Parent then part.CanCollide = was end
-	end
-	ragdoll.joints, ragdoll.collide = {}, {}
-	local char, root, hum = getChar()
-	if hum and char == ragdoll.char then
-		hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, true)
-		hum:ChangeState(Enum.HumanoidStateType.GettingUp)
-		root.CFrame = CFrame.new(root.Position + Vector3.new(0, 3, 0))   -- ยืนตรงขึ้นมา
-	end
-	ragdoll.char = nil
-end
-
-function Callbacks.Ragdoll(on)
-	if not on then unragdoll() return end
-	local char, root, hum = getChar()
-	if not char or ragdoll.char then return end
-	ragdoll.char = char
-	hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, false)
-	hum:ChangeState(Enum.HumanoidStateType.Physics)
-	for _, m in ipairs(char:GetDescendants()) do
-		-- เก็บข้อต่อหลัก (RootJoint / Root) ไว้ ให้ HumanoidRootPart ติดกับลำตัว
-		if m:IsA("Motor6D") and m.Part0 and m.Part1 and m.Name ~= "RootJoint" and m.Name ~= "Root" then
-			local a0 = Instance.new("Attachment"); a0.CFrame = m.C0; a0.Parent = m.Part0
-			local a1 = Instance.new("Attachment"); a1.CFrame = m.C1; a1.Parent = m.Part1
-			local socket = Instance.new("BallSocketConstraint")
-			socket.Attachment0, socket.Attachment1 = a0, a1
-			socket.LimitsEnabled, socket.TwistLimitsEnabled = true, true
-			socket.UpperAngle = 60
-			socket.Parent = m.Part0
-			m.Enabled = false
-			table.insert(ragdoll.joints, { motor = m, a0 = a0, a1 = a1, socket = socket })
-		end
-	end
-	for _, p in ipairs(char:GetDescendants()) do
-		if p:IsA("BasePart") and p ~= root and p.Parent == char then
-			ragdoll.collide[p] = p.CanCollide
-			p.CanCollide = true
-		end
-	end
-	-- ดันเบา ๆ ให้ล้มลง
-	root.AssemblyLinearVelocity = root.CFrame.LookVector * 8 + Vector3.new(0, 4, 0)
-	root.AssemblyAngularVelocity = root.CFrame.RightVector * 4
 end
 
 function Callbacks.FpsBoost()
@@ -671,15 +792,6 @@ end)
 local gardenPage = addTab("สวน")
 makeToggle(gardenPage, "ตัวอย่าง: ออโต้รดน้ำ", false, function(on)
 	print("[FarmHub] สวน:", on) -- TODO
-end)
-
--- ตัวละคร
-local charPage = addTab("ตัวละคร")
-local ragdollToggle = makeToggle(charPage, "Ragdoll (ล้มตามฟิสิกส์)", false, Callbacks.Ragdoll)
-makeNote(charPage, "* ปิดสวิตช์เพื่อลุกขึ้นยืน, ตายหรือรีสปอนจะปิดให้เอง")
-player.CharacterAdded:Connect(function()
-	ragdoll.joints, ragdoll.collide, ragdoll.char = {}, {}, nil
-	ragdollToggle.Set(false, true)
 end)
 
 -- 4) เพิ่ม FPS
