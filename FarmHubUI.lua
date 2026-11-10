@@ -27,7 +27,7 @@ local CONFIG = {
 	HitInterval = 0.2,             -- ตีไข่ (ส่ง EggHitRequest) ทุกกี่วินาที (ถ้าโดนปฏิเสธจะช้าลงเอง)
 	EggTimeout = 20,               -- ตีไข่ใบเดียวนานสุดกี่วินาที แล้วข้ามไปใบอื่น
 	GemRadius  = 60,               -- เก็บเพชรเฉพาะที่อยู่ใกล้ตัวในรัศมีนี้ (studs)
-	FarmGemRadius = 30,            -- ตอนฟาร์ม: เก็บเฉพาะเพชรที่ตกใกล้ตัวมาก ๆ (ไม่เดินไปไกลจนเสียเวลา)
+	GemDropWait = 0.4,             -- ไข่แตกแล้วรอเพชรดรอปนานสุดกี่วินาที ก่อนไปไข่ใบต่อไป
 	GemStay    = 0.25,             -- ยืนบนเพชรรอให้เก็บติดนานสุดกี่วินาที
 	TeleportRetries = 3,           -- วาร์ปซ้ำกี่ครั้งถ้าเกมดึงตัวกลับ
 	NoWarpDist = 300,              -- ห่างจากกลางโซนที่เลือกไม่เกินนี้ = ไม่ต้องวาร์ป Tween ไปเลย
@@ -43,7 +43,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r25"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r26"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -562,8 +562,13 @@ local function breakEgg(egg, shouldStop, skipGems)
 	setSwing(false)    -- ปุ่ม Auto Swing ของเกม: ปิดไว้ตลอด (เราตีเอง)
 	if not root or not tweenTo(eggCFrame(egg, root), shouldStop) then return false end
 	log("ตีไข่:", egg:GetAttribute("EggType"), "HP", egg:GetAttribute("Health"))
-	local started, lastHit = os.clock(), 0
+	local started, lastHit, lastGemCheck = os.clock(), 0, 0
 	while eggAlive(egg) and not shouldStop() and os.clock() - started < CONFIG.EggTimeout do
+		-- มีเพชรดรอปอยู่: เก็บเพชรก่อน แล้วค่อยกลับมาตีต่อ
+		if not skipGems and State.CollectGems and grabNearbyGems and os.clock() - lastGemCheck > 0.15 then
+			lastGemCheck = os.clock()
+			grabNearbyGems(shouldStop, CONFIG.GemRadius)
+		end
 		local _, r = getChar()
 		if r then
 			r.CFrame = eggCFrame(egg, r)
@@ -579,8 +584,13 @@ local function breakEgg(egg, shouldStop, skipGems)
 		end
 		task.wait()   -- เช็กทุกเฟรม: ไข่แตกปุ๊บ ไปต่อทันที
 	end
-	-- เพชรตกตอนไข่แตก: เก็บเฉพาะที่ตกใกล้ตัว
-	if not skipGems and State.CollectGems and grabNearbyGems then grabNearbyGems(shouldStop, CONFIG.FarmGemRadius) end
+	-- ไข่แตกแล้วเพชรจะดรอป: รอเพชรโผล่สักครู่ แล้วเก็บให้หมดก่อนไปไข่ใบต่อไป
+	if not skipGems and State.CollectGems and grabNearbyGems and not eggAlive(egg) then
+		local drops = workspace:FindFirstChild("EggGemDrops")
+		local t = os.clock()
+		while drops and #drops:GetChildren() == 0 and os.clock() - t < CONFIG.GemDropWait do task.wait() end
+		grabNearbyGems(shouldStop, CONFIG.GemRadius)
+	end
 	return not eggAlive(egg)
 end
 
