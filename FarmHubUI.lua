@@ -42,7 +42,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r18"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r19"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -241,9 +241,14 @@ local function setSwing(on)
 	syncAutoSwing()
 end
 
--- กำลังยกไข่อยู่ไหม (ตอนยกไข่ เกมจะโชว์ปุ่ม Drop)
+-- กำลังยกสัตว์อยู่ไหม (ตอนยก เกมจะโชว์ปุ่ม Drop) จำปุ่มไว้ ไม่ต้องสแกนทุกครั้ง
+local dropBtn, dropScanAt = nil, 0
 local function isCarrying()
-	return findGuiButton("Drop", true) ~= nil
+	if dropBtn and dropBtn.Parent then return isShown(dropBtn) end
+	if os.clock() < dropScanAt then return false end
+	dropScanAt = os.clock() + 0.3
+	dropBtn = findGuiButton("Drop", true)
+	return dropBtn ~= nil
 end
 
 local function eggAlive(part)
@@ -540,9 +545,12 @@ local function waitForGuardHit(guard, shouldStop)
 	local _, root, hum = getChar()
 	if not root then return false end
 	local hit, conns = false, {}
+	-- ถ้ายกสัตว์อยู่: "โดนตีแล้ว" = ผู้พิทักษ์แย่งสัตว์ไป (ปุ่ม Drop หาย) แม่นที่สุด
+	-- ถ้าไม่ได้ยก: ใช้เลือดลด / ตาย / CatchFlingRemote / กระเด็น แทน
+	local carrying = isCarrying()
 	local lastHealth = hum.Health
 	table.insert(conns, hum.HealthChanged:Connect(function(h)
-		if h < lastHealth then log("เลือดลด:", lastHealth, "->", h) hit = true end
+		if h < lastHealth then log("เลือดลด:", lastHealth, "->", h) hit = not carrying end
 		lastHealth = h
 	end))
 	table.insert(conns, hum.Died:Connect(function() hit = true end))
@@ -550,7 +558,7 @@ local function waitForGuardHit(guard, shouldStop)
 	if fling and fling:IsA("RemoteEvent") then
 		table.insert(conns, fling.OnClientEvent:Connect(function(...)
 			log("<- CatchFlingRemote", ...)
-			hit = true
+			hit = not carrying
 		end))
 	end
 	table.insert(conns, guard:GetAttributeChangedSignal("ChaseState"):Connect(function()
@@ -568,8 +576,12 @@ local function waitForGuardHit(guard, shouldStop)
 		r.CFrame = target
 		r.AssemblyLinearVelocity = Vector3.zero
 		task.wait()   -- เช็กทุกเฟรม
-		-- ถูกตีจนกระเด็น / ถูกย้ายตำแหน่ง
-		if r.Parent and (r.Position - target.Position).Magnitude > CONFIG.KnockbackDist then
+		if carrying and not isCarrying() then
+			log("ผู้พิทักษ์แย่งสัตว์ไปแล้ว")
+			hit = true
+		end
+		-- ถูกตีจนกระเด็น / ถูกย้ายตำแหน่ง (ใช้เฉพาะตอนไม่ได้ยกสัตว์)
+		if not carrying and r.Parent and (r.Position - target.Position).Magnitude > CONFIG.KnockbackDist then
 			log("ถูกกระเด็นออกจากจุดที่ยืน")
 			hit = true
 		end
