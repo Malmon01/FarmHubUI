@@ -24,10 +24,11 @@ local CONFIG = {
 	Title      = "FARM HUB",
 	LogoImage  = "",               -- เช่น "rbxassetid://1234567890" (ว่าง = แสดงคำว่า Logo)
 	ToggleKey  = Enum.KeyCode.RightControl,
-	HitDelay   = 0.15,             -- เวลาระหว่างการตีแต่ละครั้ง (วินาที)
+	HitDelay   = 0.05,             -- เวลาระหว่างการกดตีสำรองแต่ละครั้ง (วินาที)
 	EggTimeout = 20,               -- ตีไข่ใบเดียวนานสุดกี่วินาที แล้วข้ามไปใบอื่น
 	GemRadius  = 60,               -- เก็บเพชรเฉพาะที่อยู่ใกล้ตัวในรัศมีนี้ (studs)
-	GemStay    = 0.6,              -- ยืนบนเพชรรอให้เก็บติดนานสุดกี่วินาที
+	FarmGemRadius = 30,            -- ตอนฟาร์ม: เก็บเฉพาะเพชรที่ตกใกล้ตัวมาก ๆ (ไม่เดินไปไกลจนเสียเวลา)
+	GemStay    = 0.25,             -- ยืนบนเพชรรอให้เก็บติดนานสุดกี่วินาที
 	TeleportRetries = 3,           -- วาร์ปซ้ำกี่ครั้งถ้าเกมดึงตัวกลับ
 	NoWarpDist = 300,              -- ห่างจากกลางโซนที่เลือกไม่เกินนี้ = ไม่ต้องวาร์ป Tween ไปเลย
 	TeleportVia = { [13] = 12 },   -- โซนที่ไกลเกินวาร์ปตรง: วาร์ปไปโซนนี้ก่อน แล้ว Tween ต่อ
@@ -42,7 +43,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r23"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r24"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -548,7 +549,7 @@ local function breakEgg(egg, shouldStop, skipGems)
 	end
 	setSwing(false)        -- ไข่เป้าหมายแตก (หรือหยุด): ปิดทันที กันตีโดนไข่ใบอื่น
 	-- เพชรตกตอนไข่แตก: เก็บตอนนี้ (Auto Swing ปิดแล้ว)
-	if not skipGems and State.CollectGems and grabNearbyGems then grabNearbyGems(shouldStop) end
+	if not skipGems and State.CollectGems and grabNearbyGems then grabNearbyGems(shouldStop, CONFIG.FarmGemRadius) end
 	return not eggAlive(egg)
 end
 
@@ -913,13 +914,13 @@ local function describeGem(g)
 		"| ข้างใน:", table.concat(inside, ", "))
 end
 
-local function nearbyGems(root)
+local function nearbyGems(root, radius)
 	local folder = workspace:FindFirstChild("EggGemDrops")
 	local list = {}
 	if not folder then return list end
 	for _, g in ipairs(folder:GetChildren()) do
 		local part = gemPart(g)
-		if part and (part.Position - root.Position).Magnitude <= CONFIG.GemRadius then
+		if part and (part.Position - root.Position).Magnitude <= (radius or CONFIG.GemRadius) then
 			table.insert(list, g)
 		end
 	end
@@ -928,14 +929,14 @@ end
 
 -- เก็บเพชรแบบสคริปต์รุ่นก่อน: Tween (Noclip) ไปหาเพชรที่ตกใกล้ตัวทีละเม็ด จนหมด
 local gemSkip = setmetatable({}, { __mode = "k" })   -- เพชรที่เก็บไม่ติด -> ข้ามไปก่อนจนถึงเวลานี้
-grabNearbyGems = function(shouldStop)
+grabNearbyGems = function(shouldStop, radius)
 	local got = 0
 	while not (shouldStop and shouldStop()) do
 		local _, root = getChar()
 		if not root then break end
 		-- เพชรเม็ดที่ใกล้ที่สุด (ข้ามเม็ดที่เพิ่งเก็บไม่ติด)
 		local best, bestDist
-		for _, g in ipairs(nearbyGems(root)) do
+		for _, g in ipairs(nearbyGems(root, radius)) do
 			local part = gemPart(g)
 			if part and not (gemSkip[g] and os.clock() < gemSkip[g]) then
 				local d = (part.Position - root.Position).Magnitude
