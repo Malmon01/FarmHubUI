@@ -26,6 +26,8 @@ local CONFIG = {
 	ToggleKey  = Enum.KeyCode.RightControl,
 	HitDelay   = 0.15,             -- เวลาระหว่างการตีแต่ละครั้ง (วินาที)
 	EggTimeout = 20,               -- ตีไข่ใบเดียวนานสุดกี่วินาที แล้วข้ามไปใบอื่น
+	GemRadius  = 60,               -- เก็บเพชรเฉพาะที่อยู่ใกล้ตัวในรัศมีนี้ (studs)
+	GemStay    = 0.15,             -- ยืนบนเพชรกี่วินาทีให้เก็บติด
 	TeleportRetries = 3,           -- วาร์ปซ้ำกี่ครั้งถ้าเกมดึงตัวกลับ
 	TweenSpeed = 300,              -- ความเร็ว Tween (studs/วินาที)
 	LiftWait   = 12,               -- รอสัตว์ออกจากไข่แล้วกด Steal นานสุดกี่วินาที
@@ -37,7 +39,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r11"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r12"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -277,6 +279,8 @@ local function tweenTo(cf, shouldStop)
 	return done
 end
 
+local grabNearbyGems   -- กำหนดในส่วนเก็บเพชรด้านล่าง
+
 -- Tween ไปข้างไข่ แล้วตีจนแตก
 local function breakEgg(egg, shouldStop)
 	local _, root = getChar()
@@ -290,6 +294,7 @@ local function breakEgg(egg, shouldStop)
 			r.CFrame = eggCFrame(egg, r)
 			r.AssemblyLinearVelocity = Vector3.zero
 		end
+		if State.CollectGems and grabNearbyGems then grabNearbyGems() end   -- เก็บเพชรใกล้ตัวระหว่างตี
 		if tool then
 			ensureAutoSwing()
 			tool:Activate()   -- สำรอง เผื่อ Auto Swing ไม่ทำงาน
@@ -544,9 +549,8 @@ function Callbacks.AutoFarm(on)
 	end
 end
 
--- เก็บเพชร: เพชรที่ตกจากไข่อยู่ใน workspace.EggGemDrops
--- วิธีเก็บ: แตะเพชร (firetouchinterest ถ้ามี) + ดึงเพชรมาที่ตัวเรา
-local gemTried = setmetatable({}, { __mode = "k" })   -- เพชร -> เวลาที่ลองเก็บล่าสุด
+-- เก็บเพชร: เพชรที่ตกจากไข่อยู่ใน workspace.EggGemDrops (เช่น EggGemDrops.Gem)
+-- วิธีเก็บ: วาร์ปตัวละครไปแตะเพชรที่อยู่ใกล้ตัว (ในรัศมี CONFIG.GemRadius) แล้วกลับที่เดิม
 local gemLogged = false
 
 local function gemPart(g)
@@ -554,45 +558,70 @@ local function gemPart(g)
 	return g:FindFirstChildWhichIsA("BasePart", true)
 end
 
-local function collectGem(g, root)
-	local part = gemPart(g)
-	if not part then return end
-	if not gemLogged then
-		gemLogged = true
-		say("เจอเพชร:", g:GetFullName(), g.ClassName, "ชิ้นส่วน:", part.Name)
-	end
-	if firetouchinterest then
-		firetouchinterest(root, part, 0)
-		firetouchinterest(root, part, 1)
-	end
-	if g:IsA("Model") then
-		g:PivotTo(root.CFrame)
-	else
-		part.CFrame = root.CFrame
-	end
+-- พิมพ์โครงสร้างเพชรเม็ดแรกลง F9 (ไว้ดูว่าเกมเก็บเพชรแบบไหน)
+local function describeGem(g)
+	local attrs, inside = {}, {}
+	for k, v in pairs(g:GetAttributes()) do table.insert(attrs, k .. "=" .. tostring(v)) end
+	for _, d in ipairs(g:GetDescendants()) do table.insert(inside, d.Name .. "[" .. d.ClassName .. "]") end
+	say("เพชร:", g:GetFullName(), g.ClassName,
+		"| attrs:", table.concat(attrs, ", "),
+		"| ข้างใน:", table.concat(inside, ", "))
 end
 
+local function nearbyGems(root)
+	local folder = workspace:FindFirstChild("EggGemDrops")
+	local list = {}
+	if not folder then return list end
+	for _, g in ipairs(folder:GetChildren()) do
+		local part = gemPart(g)
+		if part and (part.Position - root.Position).Magnitude <= CONFIG.GemRadius then
+			table.insert(list, g)
+		end
+	end
+	return list
+end
+
+grabNearbyGems = function()
+	local _, root = getChar()
+	if not root then return end
+	local gems = nearbyGems(root)
+	if #gems == 0 then return end
+	local back = root.CFrame
+	local got = 0
+	for _, g in ipairs(gems) do
+		local part = gemPart(g)
+		if part and part.Parent then
+			if not gemLogged then gemLogged = true describeGem(g) end
+			root.CFrame = CFrame.new(part.Position)
+			root.AssemblyLinearVelocity = Vector3.zero
+			if firetouchinterest then
+				firetouchinterest(root, part, 0)
+				firetouchinterest(root, part, 1)
+			end
+			local prompt = g:FindFirstChildWhichIsA("ProximityPrompt", true)
+			if prompt then triggerPrompt(prompt) end
+			-- ยืนบนเพชรสักครู่ ให้เซิร์ฟเวอร์เห็นว่าเราแตะแล้ว
+			local t = os.clock()
+			while g.Parent and os.clock() - t < CONFIG.GemStay do task.wait() end
+			if not g.Parent then got += 1 end
+		end
+	end
+	root.CFrame = back
+	root.AssemblyLinearVelocity = Vector3.zero
+	log(string.format("เก็บเพชร %d/%d เม็ด", got, #gems))
+end
+
+-- ตอนเปิดฟาร์ม ระบบฟาร์มจะเรียกเก็บเพชรเองระหว่างตีไข่
+-- ตอนไม่ได้ฟาร์ม สวิตช์นี้จะวนเก็บเพชรใกล้ตัวเอง
 function Callbacks.CollectGems(on)
 	State.CollectGems = on
 	State.GemRun += 1
 	if not on then return end
 	local run = State.GemRun
-	local folder = workspace:FindFirstChild("EggGemDrops") or workspace:WaitForChild("EggGemDrops", 5)
-	if not folder then say("ไม่พบ workspace.EggGemDrops") return end
-	say("เปิดเก็บเพชร")
+	say("เปิดเก็บเพชร (รัศมี " .. CONFIG.GemRadius .. " studs)")
 	while State.CollectGems and State.GemRun == run do
-		local _, root = getChar()
-		if root then
-			local now = os.clock()
-			for _, g in ipairs(folder:GetChildren()) do
-				-- เพชรเดิมลองซ้ำได้ทุก 1 วิ (เผื่อรอบแรกเก็บไม่ติด)
-				if not gemTried[g] or now - gemTried[g] > 1 then
-					gemTried[g] = now
-					collectGem(g, root)
-				end
-			end
-		end
-		task.wait(0.1)
+		if not State.AutoFarm then grabNearbyGems() end
+		task.wait(0.2)
 	end
 end
 
