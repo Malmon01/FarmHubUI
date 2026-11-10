@@ -223,12 +223,10 @@ local function swingStateImages()
 end
 
 local function autoSwingIsOn(btn)
-	-- เกมเก็บสถานะใน AutoSwingColorAlpha: 0 = ปิด (แดง), 1 = เปิด (เขียว), ค่าระหว่างนั้น = กำลังเปลี่ยน
+	-- เกมเก็บสถานะใน AutoSwingColorAlpha: 0 = ปิด (แดง), มากกว่า 0 = เปิด (เขียว / กำลังกะพริบ)
 	local alpha = btn:FindFirstChild("AutoSwingColorAlpha")
 	if alpha and alpha:IsA("NumberValue") then
-		if alpha.Value >= 0.95 then return true end
-		if alpha.Value <= 0.05 then return false end
-		return nil
+		return alpha.Value > 0.05
 	end
 	local list = btn:GetDescendants()
 	table.insert(list, btn)
