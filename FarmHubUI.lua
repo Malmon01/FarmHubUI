@@ -31,7 +31,7 @@ local CONFIG = {
 	TeleportRetries = 3,           -- วาร์ปซ้ำกี่ครั้งถ้าเกมดึงตัวกลับ
 	TeleportVia = { [13] = 12 },   -- โซนที่ไกลเกินวาร์ปตรง: วาร์ปไปโซนนี้ก่อน แล้ว Tween ต่อ
 	RagdollWait = 3,               -- หลังโดนผู้พิทักษ์ตี รอตัวละครลุกขึ้นนานสุดกี่วินาที
-	SwingGreenTime = 1.5,          -- ปุ่ม Auto Swing ต้องเป็นสีเขียวต่อเนื่องนานเท่านี้ถึงจะกดเปิด
+	SwingConfirm = 0.4,             -- สีปุ่ม Auto Swing ต้องไม่ตรงกับที่ต้องการนานเท่านี้ถึงจะกด
 	TweenSpeed = 300,              -- ความเร็ว Tween (studs/วินาที)
 	LiftWait   = 12,               -- รอสัตว์ออกจากไข่แล้วกด Steal นานสุดกี่วินาที
 	LiftRadius = 60,               -- หาปุ่ม Steal ในรัศมีนี้รอบไข่ที่ตีแตก
@@ -42,7 +42,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r17"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r18"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -95,7 +95,7 @@ local State = {
 	Debug       = false,
 	FarmRun     = 0,
 	ReadyZone   = nil,
-	AutoSwingChar = nil,
+	SwingWant   = false,           -- ต้องการให้ Auto Swing เปิดอยู่ไหม
 	GemRun      = 0,
 	Priority    = "ใกล้สุดก่อน",
 }
@@ -219,31 +219,26 @@ local function autoSwingIsOn(btn)
 	return nil
 end
 
--- ให้ Auto Swing เปิดค้าง (แดง) ตลอด
--- ปุ่มของเกมกะพริบสีได้ชั่วคราว จึงกดเปิดเฉพาะเมื่อเห็นสีเขียวต่อเนื่องนาน CONFIG.SwingGreenTime วิ
--- (กันไม่ให้ไปกดตอนมันเปิดอยู่แล้ว ซึ่งจะกลายเป็นปิด)
-local lastSwingPress, greenSince = 0, nil
-local function ensureAutoSwing()
-	local char = getChar()
-	if not char then return end
+-- คุม Auto Swing ของเกมให้ตรงกับที่ต้องการ (State.SwingWant)
+--   เปิด = ยืนติดไข่ที่กำลังจะตีแล้ว, ปิด = ระหว่างเดินทาง / หลังไข่แตก
+-- ปุ่มกะพริบสีได้ จึงกดเฉพาะเมื่อสีไม่ตรงกับที่ต้องการต่อเนื่อง CONFIG.SwingConfirm วิ
+local lastSwingPress, mismatchSince = 0, nil
+local function syncAutoSwing()
 	local btn = getAutoSwingBtn()
-	if not btn or not isShown(btn) then greenSince = nil return end
+	if not btn or not isShown(btn) then mismatchSince = nil return end
 	local on = autoSwingIsOn(btn)
-	if on == true then
-		State.AutoSwingChar, greenSince = char, nil
-		return
-	end
-	if on == nil then
-		if State.AutoSwingChar == char then return end   -- ดูสีไม่ออก: กดครั้งเดียวต่อการเกิด
-	else
-		greenSince = greenSince or os.clock()
-		if os.clock() - greenSince < CONFIG.SwingGreenTime then return end
-	end
-	if os.clock() - lastSwingPress < 3 then return end   -- กดแล้วรอผลอย่างน้อย 3 วิ
-	lastSwingPress, greenSince = os.clock(), nil
-	log("เปิด Auto Swing")
+	if on == nil or on == State.SwingWant then mismatchSince = nil return end
+	mismatchSince = mismatchSince or os.clock()
+	if os.clock() - mismatchSince < CONFIG.SwingConfirm then return end
+	if os.clock() - lastSwingPress < 1 then return end   -- กดแล้วรอผลอย่างน้อย 1 วิ
+	lastSwingPress, mismatchSince = os.clock(), nil
+	log(State.SwingWant and "เปิด Auto Swing" or "ปิด Auto Swing")
 	pressButton(btn)
-	State.AutoSwingChar = char
+end
+
+local function setSwing(on)
+	State.SwingWant = on
+	syncAutoSwing()
 end
 
 -- กำลังยกไข่อยู่ไหม (ตอนยกไข่ เกมจะโชว์ปุ่ม Drop)
@@ -399,7 +394,10 @@ local grabNearbyGems   -- กำหนดในส่วนเก็บเพช
 -- Tween ไปข้างไข่ แล้วตีจนแตก
 local function breakEgg(egg, shouldStop)
 	local _, root = getChar()
+	getTool()          -- ถือที่ขุดไว้ (ปุ่ม Auto Swing จะโผล่)
+	setSwing(false)    -- ระหว่างเดินทางไปไข่: ปิด
 	if not root or not tweenTo(eggCFrame(egg, root), shouldStop) then return false end
+	setSwing(true)     -- ถึงไข่แล้ว: เปิด
 	log("ตีไข่:", egg:GetAttribute("EggType"), "HP", egg:GetAttribute("Health"))
 	local started = os.clock()
 	while eggAlive(egg) and not shouldStop() and os.clock() - started < CONFIG.EggTimeout do
@@ -411,11 +409,12 @@ local function breakEgg(egg, shouldStop)
 		end
 		if State.CollectGems and grabNearbyGems then grabNearbyGems(shouldStop) end   -- เก็บเพชรใกล้ตัวระหว่างตี
 		if tool then
-			ensureAutoSwing()
+			syncAutoSwing()
 			tool:Activate()   -- สำรอง เผื่อ Auto Swing ไม่ทำงาน
 		end
 		task.wait(CONFIG.HitDelay)
 	end
+	setSwing(false)        -- ไข่แตก (หรือหยุด): ปิด
 	return not eggAlive(egg)
 end
 
@@ -689,6 +688,13 @@ function Callbacks.AutoFarm(on)
 	local run = State.FarmRun
 	local function stopped() return not State.AutoFarm or State.FarmRun ~= run end
 	local waiting = true
+	-- คุม Auto Swing ตลอดที่ฟาร์ม (ระหว่าง Tween ด้วย) หยุดฟาร์มแล้วปิดให้
+	task.spawn(function()
+		while not stopped() do syncAutoSwing() task.wait(0.1) end
+		State.SwingWant = false
+		local t = os.clock()
+		while os.clock() - t < 3 and not State.AutoFarm do syncAutoSwing() task.wait(0.1) end
+	end)
 
 	while not stopped() do
 		if not getChar() then
