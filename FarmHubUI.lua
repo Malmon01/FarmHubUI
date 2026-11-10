@@ -392,8 +392,9 @@ local function setSwing(on)
 	if State.SwingWant ~= on then
 		lastSwingPress = 0
 		State.SwingWant = on
-		local btn = getAutoSwingBtn()
-		if btn and autoSwingIsOn(btn) ~= on and controllerSetSwing(on) then
+		local cur = controllerIsOn()
+		if cur == on then return end
+		if cur ~= nil and controllerSetSwing(on) then
 			lastSwingPress = os.clock()
 			return
 		end
