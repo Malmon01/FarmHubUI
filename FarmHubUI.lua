@@ -335,11 +335,15 @@ local function watchNewPrompts()
 	return list, function() conn:Disconnect() end
 end
 
-local function liftAnimal(eggPos, newPrompts, shouldStop)
-	local started = os.clock()
-	while os.clock() - started < CONFIG.LiftWait and not shouldStop() do
-		if isCarrying() then log("ยกสัตว์แล้ว") return true end
+-- ขั้นตอนสำคัญจะพิมพ์ลง F9 เสมอ (ไม่ต้องเปิดโหมดดีบัก)
+local function say(...)
+	print("[FarmHub]", ...)
+end
 
+local function liftAnimal(eggPos, newPrompts, shouldStop)
+	local started, lastScan, scanned, tried = os.clock(), 0, {}, 0
+	while os.clock() - started < CONFIG.LiftWait and not shouldStop() do
+		-- รวม Prompt ที่เพิ่งเกิด + ใน AnimalPickups + สแกนทั้งแมพทุก 1 วินาที
 		local candidates = table.clone(newPrompts)
 		local pickups = workspace:FindFirstChild("AnimalPickups")
 		if pickups then
@@ -347,6 +351,13 @@ local function liftAnimal(eggPos, newPrompts, shouldStop)
 				if p:IsA("ProximityPrompt") then table.insert(candidates, p) end
 			end
 		end
+		if os.clock() - lastScan > 1 then
+			lastScan, scanned = os.clock(), {}
+			for _, p in ipairs(workspace:GetDescendants()) do
+				if p:IsA("ProximityPrompt") then table.insert(scanned, p) end
+			end
+		end
+		for _, p in ipairs(scanned) do table.insert(candidates, p) end
 
 		local best, bestDist
 		for _, p in ipairs(candidates) do
@@ -360,17 +371,22 @@ local function liftAnimal(eggPos, newPrompts, shouldStop)
 		end
 
 		if best then
-			log("ยกสัตว์:", best:GetFullName(), best.ActionText, best.ObjectText)
+			say("ยกสัตว์: กด", best.ActionText, best.ObjectText, "ที่", best:GetFullName())
 			local _, root = getChar()
 			local pos = promptPos(best)
 			if root and pos then tweenTo(besideCFrame(pos, root, 2), shouldStop) end
 			triggerPrompt(best)
-			task.wait(0.5)
-			if isCarrying() then log("ยกสัตว์แล้ว") return true end
+			tried += 1
+			task.wait(0.6)
+			-- ยกได้แล้ว = ปุ่ม Steal หาย/ถูกปิด หรือมีปุ่ม Drop ขึ้นมา
+			if not best.Parent or not best.Enabled or isCarrying() then
+				say("ยกสัตว์แล้ว")
+				return true
+			end
 		end
 		task.wait(0.25)
 	end
-	log("ยกสัตว์ไม่สำเร็จ (ไม่เจอปุ่ม Steal ใกล้ไข่)")
+	say(tried > 0 and "กด Steal แล้วแต่ยังยกไม่ได้" or "ไม่เจอปุ่ม Steal ใกล้ไข่ที่ตีแตก")
 	return false
 end
 
@@ -420,24 +436,24 @@ end
 -- ขั้นเตรียม: ขุดไข่โซนที่ใกล้ที่สุด -> ยกสัตว์ที่ออกจากไข่ (Steal) -> พุ่งไปหาผู้พิทักษ์ให้ตี
 local function warmUp(shouldStop)
 	local egg, zoneName = nearestZoneEgg()
-	if not egg then log("ไม่พบไข่ใกล้ ๆ ข้ามขั้นผู้พิทักษ์") return end
+	if not egg then say("ไม่พบไข่ใกล้ ๆ ข้ามขั้นผู้พิทักษ์") return end
 
-	log("ขั้นที่ 1: ขุดไข่ใน", zoneName)
+	say("ขั้นที่ 1: ขุดไข่ใน", zoneName)
 	local eggPos = egg.Position
 	local newPrompts, stopWatching = watchNewPrompts()
 	breakEgg(egg, shouldStop)
 	if not shouldStop() then
-		log("ขั้นที่ 2: ยกสัตว์")
+		say("ขั้นที่ 2: ยกสัตว์")
 		liftAnimal(eggPos, newPrompts, shouldStop)
 	end
 	stopWatching()
 	if shouldStop() then return end
 
 	local guard = getGuard(zoneName)
-	if not guard then log("ไม่พบผู้พิทักษ์ใน", zoneName) return end
-	log("ขั้นที่ 3: พุ่งไปหาผู้พิทักษ์", guard.Name)
+	if not guard then say("ไม่พบผู้พิทักษ์ใน", zoneName) return end
+	say("ขั้นที่ 3: พุ่งไปหาผู้พิทักษ์", guard.Name)
 	local hit = waitForGuardHit(guard, shouldStop)
-	log(hit and "ผู้พิทักษ์ตีแล้ว" or "หมดเวลารอผู้พิทักษ์")
+	say(hit and "ผู้พิทักษ์ตีแล้ว" or "หมดเวลารอผู้พิทักษ์")
 	task.wait(1)
 	if not getChar() then player.CharacterAdded:Wait() task.wait(1) end   -- ถ้าตาย รอเกิดใหม่
 end
@@ -472,7 +488,7 @@ function Callbacks.AutoFarm(on)
 			local target = State.Zone
 			warmUp(stopped)
 			State.ReadyZone = target
-			log("ขั้นที่ 4: ไปฟาร์มที่", target)
+			say("ขั้นที่ 4: ไปฟาร์มที่", target)
 		else
 			local egg = findEgg(State.Zone, State.Egg)
 			if egg then
