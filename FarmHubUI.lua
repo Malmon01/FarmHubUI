@@ -42,7 +42,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r29"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r30"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -583,7 +583,8 @@ local function tweenTo(cf, shouldStop)
 	return done
 end
 
-local grabNearbyGems   -- กำหนดในส่วนเก็บเพชรด้านล่าง
+local grabNearbyGems     -- กำหนดในส่วนเก็บเพชรด้านล่าง
+local hasCollectableGems -- กำหนดในส่วนเก็บเพชรด้านล่าง
 
 -- ตีไข่ตรง ๆ แบบที่ MYHUB ทำ (ไม่ใช้ปุ่ม Auto Swing ของเกม จึงไม่ตีโดนไข่ใบอื่น)
 --   ReplicatedStorage.MasteryPickaxeSwing:FireServer()
@@ -620,8 +621,7 @@ end
 -- Tween ไปข้างไข่ แล้วตีจนแตก
 -- มีเพชรตกอยู่ใกล้ ๆ ไหม
 local function gemsAround()
-	local drops = workspace:FindFirstChild("EggGemDrops")
-	return drops ~= nil and #drops:GetChildren() > 0
+	return hasCollectableGems ~= nil and hasCollectableGems(CONFIG.GemRadius)
 end
 
 -- เก็บเพชรก่อนเสมอ (ปิด Auto Swing ระหว่างเก็บ กันตีโดนไข่ระหว่างทาง)
@@ -1049,6 +1049,15 @@ end
 
 -- เก็บเพชรแบบสคริปต์รุ่นก่อน: Tween (Noclip) ไปหาเพชรที่ตกใกล้ตัวทีละเม็ด จนหมด
 local gemSkip = setmetatable({}, { __mode = "k" })   -- เพชรที่เก็บไม่ติด -> ข้ามไปก่อนจนถึงเวลานี้
+-- มีเพชรที่เก็บได้จริงอยู่ในรัศมีไหม (ไม่นับเม็ดที่เพิ่งเก็บไม่ติด)
+hasCollectableGems = function(radius)
+	local _, root = getChar()
+	if not root then return false end
+	for _, g in ipairs(nearbyGems(root, radius)) do
+		if not (gemSkip[g] and os.clock() < gemSkip[g]) then return true end
+	end
+	return false
+end
 grabNearbyGems = function(shouldStop, radius)
 	local got = 0
 	while not (shouldStop and shouldStop()) do
@@ -1083,7 +1092,7 @@ grabNearbyGems = function(shouldStop, radius)
 			task.wait()
 		end
 		if best.Parent then
-			gemSkip[best] = os.clock() + 3
+			gemSkip[best] = os.clock() + 30   -- เก็บไม่ติด (อาจเป็นของคนอื่น): ข้ามไปนาน ๆ
 		else
 			got += 1
 		end
