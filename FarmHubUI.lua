@@ -234,6 +234,59 @@ function Callbacks.Debug(on)
 	end
 end
 
+-- Ragdoll: ปิดข้อต่อ (Motor6D) แล้วใส่ BallSocket แทน ให้ตัวละครล้มตามฟิสิกส์
+local ragdoll = { joints = {}, collide = {}, char = nil }
+
+local function unragdoll()
+	for _, j in ipairs(ragdoll.joints) do
+		j.socket:Destroy(); j.a0:Destroy(); j.a1:Destroy()
+		if j.motor.Parent then j.motor.Enabled = true end
+	end
+	for part, was in pairs(ragdoll.collide) do
+		if part.Parent then part.CanCollide = was end
+	end
+	ragdoll.joints, ragdoll.collide = {}, {}
+	local char, root, hum = getChar()
+	if hum and char == ragdoll.char then
+		hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, true)
+		hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+		root.CFrame = CFrame.new(root.Position + Vector3.new(0, 3, 0))   -- ยืนตรงขึ้นมา
+	end
+	ragdoll.char = nil
+end
+
+function Callbacks.Ragdoll(on)
+	if not on then unragdoll() return end
+	local char, root, hum = getChar()
+	if not char or ragdoll.char then return end
+	ragdoll.char = char
+	hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, false)
+	hum:ChangeState(Enum.HumanoidStateType.Physics)
+	for _, m in ipairs(char:GetDescendants()) do
+		-- เก็บข้อต่อหลัก (RootJoint / Root) ไว้ ให้ HumanoidRootPart ติดกับลำตัว
+		if m:IsA("Motor6D") and m.Part0 and m.Part1 and m.Name ~= "RootJoint" and m.Name ~= "Root" then
+			local a0 = Instance.new("Attachment"); a0.CFrame = m.C0; a0.Parent = m.Part0
+			local a1 = Instance.new("Attachment"); a1.CFrame = m.C1; a1.Parent = m.Part1
+			local socket = Instance.new("BallSocketConstraint")
+			socket.Attachment0, socket.Attachment1 = a0, a1
+			socket.LimitsEnabled, socket.TwistLimitsEnabled = true, true
+			socket.UpperAngle = 60
+			socket.Parent = m.Part0
+			m.Enabled = false
+			table.insert(ragdoll.joints, { motor = m, a0 = a0, a1 = a1, socket = socket })
+		end
+	end
+	for _, p in ipairs(char:GetDescendants()) do
+		if p:IsA("BasePart") and p ~= root and p.Parent == char then
+			ragdoll.collide[p] = p.CanCollide
+			p.CanCollide = true
+		end
+	end
+	-- ดันเบา ๆ ให้ล้มลง
+	root.AssemblyLinearVelocity = root.CFrame.LookVector * 8 + Vector3.new(0, 4, 0)
+	root.AssemblyAngularVelocity = root.CFrame.RightVector * 4
+end
+
 function Callbacks.FpsBoost()
 	Lighting.GlobalShadows = false
 	Lighting.FogEnd = 9e9
@@ -618,6 +671,15 @@ end)
 local gardenPage = addTab("สวน")
 makeToggle(gardenPage, "ตัวอย่าง: ออโต้รดน้ำ", false, function(on)
 	print("[FarmHub] สวน:", on) -- TODO
+end)
+
+-- ตัวละคร
+local charPage = addTab("ตัวละคร")
+local ragdollToggle = makeToggle(charPage, "Ragdoll (ล้มตามฟิสิกส์)", false, Callbacks.Ragdoll)
+makeNote(charPage, "* ปิดสวิตช์เพื่อลุกขึ้นยืน, ตายหรือรีสปอนจะปิดให้เอง")
+player.CharacterAdded:Connect(function()
+	ragdoll.joints, ragdoll.collide, ragdoll.char = {}, {}, nil
+	ragdollToggle.Set(false, true)
 end)
 
 -- 4) เพิ่ม FPS
