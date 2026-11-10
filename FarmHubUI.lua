@@ -41,7 +41,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r13"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r14"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -185,16 +185,53 @@ local function pressButton(btn)
 	vim:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
 end
 
--- เปิด Auto Swing (ปุ่มนี้โผล่ตอนถือที่ขุด) กดครั้งเดียวต่อการเกิด 1 ครั้ง
+-- ปุ่ม Auto Swing ของเกม: PlayerGui.MainGUI.AutoSwing
+-- สีแดง = เปิดอยู่, สีเขียว = ปิดอยู่ (เกมไม่มีค่าอื่นบอกสถานะ เลยดูจากสี)
+local autoSwingBtn
+local function getAutoSwingBtn()
+	if autoSwingBtn and autoSwingBtn.Parent then return autoSwingBtn end
+	local pg = player:FindFirstChild("PlayerGui")
+	local main = pg and pg:FindFirstChild("MainGUI")
+	autoSwingBtn = main and main:FindFirstChild("AutoSwing") or findGuiButton("Auto Swing")
+	return autoSwingBtn
+end
+
+-- คืนค่า true = เปิด (แดง), false = ปิด (เขียว), nil = ดูไม่ออก
+local function autoSwingIsOn(btn)
+	local reds, greens = 0, 0
+	local function judge(c)
+		if c.R - c.G > 0.25 then reds += 1 elseif c.G - c.R > 0.25 then greens += 1 end
+	end
+	local list = btn:GetDescendants()
+	table.insert(list, btn)
+	for _, d in ipairs(list) do
+		if d:IsA("GuiObject") and d.Visible then
+			if d.BackgroundTransparency < 1 then judge(d.BackgroundColor3) end
+			if (d:IsA("ImageLabel") or d:IsA("ImageButton")) and d.ImageTransparency < 1 then judge(d.ImageColor3) end
+		elseif d:IsA("UIGradient") and d.Enabled then
+			for _, k in ipairs(d.Color.Keypoints) do judge(k.Value) end
+		end
+	end
+	if reds > greens then return true end
+	if greens > reds then return false end
+	return nil
+end
+
+-- ให้ Auto Swing เปิดค้าง (แดง) ตลอด: ถ้าเป็นสีเขียวจะกดเปิด
+local lastSwingPress = 0
 local function ensureAutoSwing()
 	local char = getChar()
-	if not char or State.AutoSwingChar == char then return end
-	local btn = findGuiButton("Auto Swing")
-	if btn then
-		log("กด Auto Swing:", btn:GetFullName())
-		pressButton(btn)
-		State.AutoSwingChar = char
-	end
+	if not char then return end
+	local btn = getAutoSwingBtn()
+	if not btn or not isShown(btn) then return end
+	local on = autoSwingIsOn(btn)
+	if on == true then State.AutoSwingChar = char return end
+	if on == nil and State.AutoSwingChar == char then return end   -- ดูสีไม่ออก: กดครั้งเดียวต่อการเกิด
+	if os.clock() - lastSwingPress < 1 then return end            -- กันกดรัวจนเปิด-ปิดสลับ
+	lastSwingPress = os.clock()
+	log("เปิด Auto Swing")
+	pressButton(btn)
+	State.AutoSwingChar = char
 end
 
 -- กำลังยกไข่อยู่ไหม (ตอนยกไข่ เกมจะโชว์ปุ่ม Drop)
