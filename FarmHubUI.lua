@@ -26,6 +26,7 @@ local CONFIG = {
 	ToggleKey  = Enum.KeyCode.RightControl,
 	HitDelay   = 0.15,             -- เวลาระหว่างการตีแต่ละครั้ง (วินาที)
 	EggTimeout = 20,               -- ตีไข่ใบเดียวนานสุดกี่วินาที แล้วข้ามไปใบอื่น
+	TeleportRetries = 3,           -- วาร์ปซ้ำกี่ครั้งถ้าเกมดึงตัวกลับ
 	TweenSpeed = 300,              -- ความเร็ว Tween (studs/วินาที)
 	LiftWait   = 12,               -- รอสัตว์ออกจากไข่แล้วกด Steal นานสุดกี่วินาที
 	LiftRadius = 60,               -- หาปุ่ม Steal ในรัศมีนี้รอบไข่ที่ตีแตก
@@ -36,6 +37,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
+local VERSION = "2026-11-10 r9"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -458,19 +460,25 @@ local function warmUp(shouldStop)
 end
 
 -- วาร์ปทันที (ไม่ใช่ Tween) ไปข้างไข่ในโซนที่เลือก ถ้ายังไม่เห็นไข่ วาร์ปไปกลางโซน
+-- ถ้าเกมดึงตัวกลับ จะวาร์ปซ้ำ (สูงสุด CONFIG.TeleportRetries ครั้ง)
 local function teleportToZone(zoneName)
-	local _, root = getChar()
-	if not root then return end
-	local egg = findEgg(zoneName, State.Egg) or findEgg(zoneName, ALL_EGGS)
-	if egg then
-		root.CFrame = eggCFrame(egg, root)
-	else
-		local zone = CONFIG.ZoneModels[zoneName]
-		if not zone then return end
-		root.CFrame = zone:GetPivot() + Vector3.new(0, 5, 0)
-		task.wait(0.5)   -- รอไข่ในโซนโหลด
+	local zone = CONFIG.ZoneModels[zoneName]
+	for attempt = 1, CONFIG.TeleportRetries do
+		local _, root = getChar()
+		if not root or not zone then return false end
+		local egg = findEgg(zoneName, State.Egg) or findEgg(zoneName, ALL_EGGS)
+		local target = egg and eggCFrame(egg, root) or (zone:GetPivot() + Vector3.new(0, 5, 0))
+		root.CFrame = target
+		root.AssemblyLinearVelocity = Vector3.zero
+		task.wait(0.4)
+		if root.Parent and (root.Position - target.Position).Magnitude < 40 then
+			say("วาร์ปถึงแล้ว (ครั้งที่ " .. attempt .. ")")
+			if not egg then task.wait(0.5) end   -- รอไข่ในโซนโหลด
+			return true
+		end
+		say("เกมดึงตัวกลับหลังวาร์ป ลองใหม่ (ครั้งที่ " .. attempt .. ")")
 	end
-	root.AssemblyLinearVelocity = Vector3.zero
+	return false
 end
 
 ---------------------------------------------------------------------
@@ -684,6 +692,11 @@ label(side, CONFIG.Title, {
 	Position = UDim2.fromOffset(14, 10), Size = UDim2.new(1, -28, 0, 30),
 	TextSize = 18, Font = Enum.Font.GothamBold, TextColor3 = C.Accent,
 })
+label(side, "v " .. VERSION, {
+	AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 14, 1, -8),
+	Size = UDim2.new(1, -28, 0, 16), TextSize = 11, TextColor3 = C.SubText,
+})
+print("[FarmHub] โหลดเวอร์ชัน", VERSION)
 
 local tabHolder = create("Frame", {
 	Position = UDim2.fromOffset(10, 52), Size = UDim2.new(1, -20, 1, -62),
