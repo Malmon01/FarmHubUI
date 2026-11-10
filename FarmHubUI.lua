@@ -27,7 +27,8 @@ local CONFIG = {
 	HitDelay   = 0.15,             -- เวลาระหว่างการตีแต่ละครั้ง (วินาที)
 	EggTimeout = 20,               -- ตีไข่ใบเดียวนานสุดกี่วินาที แล้วข้ามไปใบอื่น
 	TweenSpeed = 300,              -- ความเร็ว Tween (studs/วินาที)
-	LiftDelay  = 0.6,              -- รอหลังไข่แตกก่อนยกไข่ (วินาที)
+	LiftDelay  = 3,                -- รอให้ยกไข่หลังไข่แตกนานสุดกี่วินาที
+	ToolKeyword = "Pickaxe",       -- ชื่อที่ขุด (Elite Pickaxe ฯลฯ)
 	GuardTimeout = 30,             -- รอผู้พิทักษ์ตีนานสุดกี่วินาที
 	KnockbackDist = 12,            -- ถูกดันออกไกลเกินนี้ = โดนตีแล้ว
 	ZoneOrder  = {},
@@ -85,6 +86,7 @@ local State = {
 	Debug       = false,
 	FarmRun     = 0,
 	ReadyZone   = nil,
+	AutoSwingChar = nil,
 }
 
 ---------------------------------------------------------------------
@@ -97,26 +99,104 @@ local function getChar()
 	if root and hum and hum.Health > 0 then return char, root, hum end
 end
 
--- ถืออาวุธ (ใช้ชิ้นที่ถืออยู่ ถ้าไม่ได้ถือจะหยิบชิ้นแรกในกระเป๋า)
+local function log(...)
+	if State.Debug then print("[FarmHub]", ...) end
+end
+
+-- ถือที่ขุด: หา Tool ที่ชื่อมี CONFIG.ToolKeyword (เช่น "Elite Pickaxe") แล้วถือ
 local function getTool()
 	local char, _, hum = getChar()
 	if not char then return end
-	local tool = char:FindFirstChildOfClass("Tool")
-	if tool then return tool end
+	local kw = CONFIG.ToolKeyword:lower()
+	local held = char:FindFirstChildOfClass("Tool")
+	if held and held.Name:lower():find(kw, 1, true) then return held end
 	local backpack = player:FindFirstChild("Backpack")
-	tool = backpack and backpack:FindFirstChildOfClass("Tool")
-	if tool then hum:EquipTool(tool) end
-	return tool
+	if backpack then
+		for _, t in ipairs(backpack:GetChildren()) do
+			if t:IsA("Tool") and t.Name:lower():find(kw, 1, true) then
+				log("ถือ:", t.Name)
+				hum:EquipTool(t)
+				return t
+			end
+		end
+	end
+	log("ไม่พบ Tool ที่ชื่อมี '" .. CONFIG.ToolKeyword .. "' ในกระเป๋า")
+end
+
+-- หา GUI ปุ่มที่มองเห็นอยู่บนจอ จากข้อความ/ชื่อ (เช่น "Auto Swing", "Drop")
+local function isShown(gui)
+	local g = gui
+	while g and not g:IsA("LayerCollector") do
+		if g:IsA("GuiObject") and not g.Visible then return false end
+		g = g.Parent
+	end
+	return g ~= nil and g.Enabled
+end
+
+local function squash(s) return (s:lower():gsub("%s", "")) end
+
+-- exact = true: ข้อความ/ชื่อต้องตรงทั้งคำ (กันไปเจอปุ่มอื่นที่มีคำนี้อยู่ข้างใน)
+local function findGuiButton(text, exact)
+	local pg = player:FindFirstChild("PlayerGui")
+	if not pg then return end
+	local want = squash(text)
+	local function match(s)
+		s = squash(s)
+		if exact then return s == want end
+		return s:find(want, 1, true) ~= nil
+	end
+	for _, d in ipairs(pg:GetDescendants()) do
+		if d:IsA("GuiObject") and not d:IsDescendantOf(pg:FindFirstChild("FarmHubUI") or d) then
+			local label = (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Text or ""
+			if match(label) or match(d.Name) then
+				local btn = d:IsA("GuiButton") and d or d:FindFirstAncestorWhichIsA("GuiButton")
+				if btn and isShown(btn) then return btn end
+			end
+		end
+	end
+end
+
+-- กดปุ่ม GUI ของเกม (ใช้ getconnections ถ้ามี ไม่งั้นจำลองการคลิกเมาส์)
+local function pressButton(btn)
+	if getconnections then
+		for _, sig in ipairs({ btn.Activated, btn.MouseButton1Click, btn.MouseButton1Down }) do
+			local conns = getconnections(sig)
+			if #conns > 0 then
+				for _, c in ipairs(conns) do pcall(function() c:Fire() end) end
+				return
+			end
+		end
+	end
+	local vim = game:GetService("VirtualInputManager")
+	local sg = btn:FindFirstAncestorWhichIsA("ScreenGui")
+	local inset = (sg and sg.IgnoreGuiInset) and Vector2.zero or game:GetService("GuiService"):GetGuiInset()
+	local p = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+	vim:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 0)
+	task.wait(0.05)
+	vim:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
+end
+
+-- เปิด Auto Swing (ปุ่มนี้โผล่ตอนถือที่ขุด) กดครั้งเดียวต่อการเกิด 1 ครั้ง
+local function ensureAutoSwing()
+	local char = getChar()
+	if not char or State.AutoSwingChar == char then return end
+	local btn = findGuiButton("Auto Swing")
+	if btn then
+		log("กด Auto Swing:", btn:GetFullName())
+		pressButton(btn)
+		State.AutoSwingChar = char
+	end
+end
+
+-- กำลังยกไข่อยู่ไหม (ตอนยกไข่ เกมจะโชว์ปุ่ม Drop)
+local function isCarrying()
+	return findGuiButton("Drop", true) ~= nil
 end
 
 local function eggAlive(part)
 	return part and part.Parent ~= nil
 		and part:GetAttribute("Broken") ~= true
 		and (part:GetAttribute("Health") or 1) > 0
-end
-
-local function log(...)
-	if State.Debug then print("[FarmHub]", ...) end
 end
 
 -- หาไข่ที่ใกล้ที่สุดในโซน (filter = ชื่อชนิดไข่ หรือ ALL_EGGS) คืนค่า (ไข่, ระยะ)
@@ -205,20 +285,27 @@ local function breakEgg(egg, shouldStop)
 			r.CFrame = eggCFrame(egg, r)
 			r.AssemblyLinearVelocity = Vector3.zero
 		end
-		if tool then tool:Activate() end
+		if tool then
+			ensureAutoSwing()
+			tool:Activate()   -- สำรอง เผื่อ Auto Swing ไม่ทำงาน
+		end
 		task.wait(CONFIG.HitDelay)
 	end
 	return not eggAlive(egg)
 end
 
--- ยกไข่: ถ้ามี ProximityPrompt ใกล้ตัว (ในไข่ที่แตก หรือใน AnimalPickups) จะกดให้
+-- ยกไข่: ปกติเกมยกให้เองตอนไข่แตก (มีปุ่ม Drop โผล่) ถ้ายังไม่ยก จะลองกด ProximityPrompt ใกล้ตัว
 local function liftEgg(eggModel)
-	task.wait(CONFIG.LiftDelay)
+	local started = os.clock()
+	while os.clock() - started < CONFIG.LiftDelay do
+		if isCarrying() then log("ยกไข่แล้ว") return true end
+		task.wait(0.1)
+	end
 	local _, root = getChar()
-	if not root then return end
+	if not root then return false end
 	if not fireproximityprompt then
-		log("ตัวรันนี้ไม่มี fireproximityprompt (ถ้ายกไข่อัตโนมัติอยู่แล้วก็ไม่เป็นไร)")
-		return
+		log("ยังไม่ได้ยกไข่ และตัวรันนี้ไม่มี fireproximityprompt")
+		return false
 	end
 	for _, scope in ipairs({ eggModel, workspace:FindFirstChild("AnimalPickups") }) do
 		if scope then
@@ -231,6 +318,10 @@ local function liftEgg(eggModel)
 			end
 		end
 	end
+	task.wait(0.5)
+	local carrying = isCarrying()
+	log(carrying and "ยกไข่แล้ว" or "ยังไม่ได้ยกไข่")
+	return carrying
 end
 
 -- Tween ไปหาผู้พิทักษ์ แล้วยืนติดตัวจนกว่าจะโดนตี
