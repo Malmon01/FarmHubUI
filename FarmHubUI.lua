@@ -30,7 +30,6 @@ local CONFIG = {
 	GemStay    = 0.6,              -- ยืนบนเพชรรอให้เก็บติดนานสุดกี่วินาที
 	TeleportRetries = 3,           -- วาร์ปซ้ำกี่ครั้งถ้าเกมดึงตัวกลับ
 	TeleportVia = { [13] = 12 },   -- โซนที่ไกลเกินวาร์ปตรง: วาร์ปไปโซนนี้ก่อน แล้ว Tween ต่อ
-	RagdollWait = 3,               -- หลังโดนผู้พิทักษ์ตี รอตัวละครลุกขึ้นนานสุดกี่วินาที
 	SwingConfirm = 0.4,             -- สีปุ่ม Auto Swing ต้องไม่ตรงกับที่ต้องการนานเท่านี้ถึงจะกด
 	TweenSpeed = 300,              -- ความเร็ว Tween (studs/วินาที)
 	LiftWait   = 12,               -- รอสัตว์ออกจากไข่แล้วกด Steal นานสุดกี่วินาที
@@ -42,7 +41,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r20"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r21"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -224,6 +223,13 @@ local function swingStateImages()
 end
 
 local function autoSwingIsOn(btn)
+	-- เกมเก็บสถานะใน AutoSwingColorAlpha: 0 = ปิด (แดง), 1 = เปิด (เขียว), ค่าระหว่างนั้น = กำลังเปลี่ยน
+	local alpha = btn:FindFirstChild("AutoSwingColorAlpha")
+	if alpha and alpha:IsA("NumberValue") then
+		if alpha.Value >= 0.95 then return true end
+		if alpha.Value <= 0.05 then return false end
+		return nil
+	end
 	local list = btn:GetDescendants()
 	table.insert(list, btn)
 	local images = swingStateImages()
@@ -349,6 +355,28 @@ local function eggSelected(part)
 	return State.Eggs[part:GetAttribute("EggType")] == true
 end
 
+-- จำตำแหน่งกลางโซน (เฉลี่ยตำแหน่งไข่ที่เคยเห็น) และบันทึกลงไฟล์ ใช้วาร์ปไปโซนที่อยู่ไกลจนไข่ยังไม่โหลด
+local HttpService = game:GetService("HttpService")
+local ZONE_FILE = "FarmHub_zones.json"
+local ZonePos = {}
+pcall(function()
+	if isfile and isfile(ZONE_FILE) then
+		for name, v in pairs(HttpService:JSONDecode(readfile(ZONE_FILE))) do
+			ZonePos[name] = Vector3.new(v[1], v[2], v[3])
+		end
+	end
+end)
+local zoneSaveAt = 0
+local function rememberZone(zoneName, pos)
+	ZonePos[zoneName] = pos
+	if writefile and os.clock() > zoneSaveAt then
+		zoneSaveAt = os.clock() + 20
+		local data = {}
+		for n, p in pairs(ZonePos) do data[n] = { p.X, p.Y, p.Z } end
+		pcall(writefile, ZONE_FILE, HttpService:JSONEncode(data))
+	end
+end
+
 -- หาไข่ในโซน
 --   filter   = ชื่อชนิดไข่ หรือ ALL_EGGS
 --   usePrefs = true: ใช้ชนิดไข่ที่เลือก + ลำดับการตีที่ตั้งไว้ (ใช้ตอนฟาร์ม)
@@ -360,8 +388,10 @@ local function findEgg(zoneName, filter, usePrefs)
 	if not folder or not root then return end
 	local priority = usePrefs and State.Priority or PRIORITY_NEAR
 	local best, bestDist, bestScore
+	local sum, count = Vector3.zero, 0
 	for _, m in ipairs(folder:GetChildren()) do
 		local part = m:FindFirstChild("Egg")
+		if part and part:IsA("BasePart") then sum += part.Position count += 1 end
 		if part and part:IsA("BasePart") and eggAlive(part)
 			and (filter == ALL_EGGS or part:GetAttribute("EggType") == filter)
 			and (not usePrefs or eggSelected(part)) then
@@ -378,6 +408,7 @@ local function findEgg(zoneName, filter, usePrefs)
 			end
 		end
 	end
+	if count > 0 then rememberZone(zoneName, sum / count) end
 	return best, bestDist
 end
 
@@ -686,22 +717,6 @@ local function warmUp(shouldStop)
 	say(hit and "ผู้พิทักษ์ตีแล้ว" or "หมดเวลารอผู้พิทักษ์")
 	if not getChar() then player.CharacterAdded:Wait() task.wait(1) end   -- ถ้าตาย รอเกิดใหม่
 
-	-- รอตัวละครลุกจากการล้ม (ragdoll) ก่อนวาร์ป ไม่งั้นตัวจะยืด
-	local ragdollStates = {
-		[Enum.HumanoidStateType.Physics] = true,
-		[Enum.HumanoidStateType.Ragdoll] = true,
-		[Enum.HumanoidStateType.FallingDown] = true,
-		[Enum.HumanoidStateType.GettingUp] = true,
-		[Enum.HumanoidStateType.PlatformStanding] = true,
-	}
-	local t = os.clock()
-	local _, _, hum = getChar()
-	if hum and ragdollStates[hum:GetState()] then say("รอตัวละครลุกขึ้น") end
-	while os.clock() - t < CONFIG.RagdollWait do
-		_, _, hum = getChar()
-		if hum and not ragdollStates[hum:GetState()] and not hum.PlatformStand then break end
-		task.wait()
-	end
 	return zoneName
 end
 
@@ -709,8 +724,25 @@ end
 local function zoneTarget(zoneName, root)
 	local egg = findEgg(zoneName, ALL_EGGS, true) or findEgg(zoneName, ALL_EGGS)
 	if egg then return eggCFrame(egg, root) end
+	-- ไข่ยังไม่โหลด: ใช้ตำแหน่งกลางโซนที่จำไว้ ถ้ายังไม่เคยเห็น ใช้กึ่งกลางกรอบของโมเดลโซน
+	if ZonePos[zoneName] then
+		return onGround(CFrame.new(ZonePos[zoneName] + Vector3.new(0, 5, 0)))
+	end
+	-- ลอง ZoneHitboxes ก่อน (กล่องขอบเขตโซน) แล้วค่อยใช้กรอบของโมเดลโซน
+	local num = zoneName:match("(%d+)")
+	local build = workspace:FindFirstChild("Build")
+	local hitboxes = build and build:FindFirstChild("ZoneHitboxes")
+	local hb = hitboxes and num and (hitboxes:FindFirstChild("Zone" .. num) or hitboxes:FindFirstChild(num))
+	if hb then
+		local pos = hb:IsA("BasePart") and hb.Position or (hb:IsA("Model") and hb:GetBoundingBox().Position)
+		if pos then return onGround(CFrame.new(pos + Vector3.new(0, 5, 0))) end
+	end
 	local zone = CONFIG.ZoneModels[zoneName]
-	return zone and (zone:GetPivot() + Vector3.new(0, 5, 0))
+	if not zone then return end
+	local ok, box = pcall(zone.GetBoundingBox, zone)
+	local cf = ok and box or zone:GetPivot()
+	say("ยังไม่รู้ตำแหน่ง", zoneName, "ใช้กึ่งกลางโมเดลโซน")
+	return onGround(CFrame.new(cf.Position + Vector3.new(0, 5, 0)))
 end
 
 -- วาร์ปทันทีไปโซน (ถ้าเกมดึงตัวกลับ จะวาร์ปซ้ำ สูงสุด CONFIG.TeleportRetries ครั้ง)
@@ -772,6 +804,10 @@ function Callbacks.AutoFarm(on)
 	if not on then return end
 	local run = State.FarmRun
 	local function stopped() return not State.AutoFarm or State.FarmRun ~= run end
+	-- ตาย/เกิดใหม่ระหว่างฟาร์ม: เริ่มขั้นเตรียม + วาร์ปใหม่ ไม่ Tween ข้ามแมพจากจุดเกิด
+	local respawnConn = player.CharacterAdded:Connect(function()
+		if not stopped() then say("ตัวละครเกิดใหม่ เริ่มรอบใหม่") State.ReadyZone = nil end
+	end)
 	local waiting = true
 	-- คุม Auto Swing ตลอดที่ฟาร์ม (ระหว่าง Tween ด้วย) หยุดฟาร์มแล้วปิดให้
 	task.spawn(function()
@@ -807,6 +843,7 @@ function Callbacks.AutoFarm(on)
 		end
 		task.wait()
 	end
+	respawnConn:Disconnect()
 end
 
 -- เก็บเพชร: เพชรที่ตกจากไข่อยู่ใน workspace.EggGemDrops (เช่น EggGemDrops.Gem)
