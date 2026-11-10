@@ -37,7 +37,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r9"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r10"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -317,14 +317,15 @@ local function isLiftPrompt(p)
 end
 
 local function triggerPrompt(p)
+	p.HoldDuration = 0   -- ไม่ต้องกดค้าง (ฝั่งเรา)
 	if fireproximityprompt then
 		fireproximityprompt(p)
 		return
 	end
-	-- ไม่มี fireproximityprompt: กดปุ่มคีย์บอร์ดของ Prompt ค้างไว้ตามเวลาที่ต้องกดค้าง
+	-- ไม่มี fireproximityprompt: กดปุ่มคีย์บอร์ดของ Prompt แทน
 	local vim = game:GetService("VirtualInputManager")
 	vim:SendKeyEvent(true, p.KeyboardKeyCode, false, game)
-	task.wait(p.HoldDuration + 0.15)
+	task.wait(0.05)
 	vim:SendKeyEvent(false, p.KeyboardKeyCode, false, game)
 end
 
@@ -342,51 +343,67 @@ local function say(...)
 	print("[FarmHub]", ...)
 end
 
-local function liftAnimal(eggPos, newPrompts, shouldStop)
-	local started, lastScan, scanned, tried = os.clock(), 0, {}, 0
-	while os.clock() - started < CONFIG.LiftWait and not shouldStop() do
-		-- รวม Prompt ที่เพิ่งเกิด + ใน AnimalPickups + สแกนทั้งแมพทุก 1 วินาที
-		local candidates = table.clone(newPrompts)
-		local pickups = workspace:FindFirstChild("AnimalPickups")
-		if pickups then
-			for _, p in ipairs(pickups:GetDescendants()) do
-				if p:IsA("ProximityPrompt") then table.insert(candidates, p) end
+local function bestLiftPrompt(list, eggPos)
+	local best, bestDist
+	for _, p in ipairs(list) do
+		if p.Parent and p.Enabled and isLiftPrompt(p) then
+			local pos = promptPos(p)
+			local d = pos and (pos - eggPos).Magnitude
+			if d and d < CONFIG.LiftRadius and (not bestDist or d < bestDist) then
+				best, bestDist = p, d
 			end
 		end
-		if os.clock() - lastScan > 1 then
-			lastScan, scanned = os.clock(), {}
-			for _, p in ipairs(workspace:GetDescendants()) do
-				if p:IsA("ProximityPrompt") then table.insert(scanned, p) end
-			end
-		end
-		for _, p in ipairs(scanned) do table.insert(candidates, p) end
+	end
+	return best
+end
 
-		local best, bestDist
-		for _, p in ipairs(candidates) do
-			if p.Parent and p.Enabled and isLiftPrompt(p) then
-				local pos = promptPos(p)
-				local d = pos and (pos - eggPos).Magnitude
-				if d and d < CONFIG.LiftRadius and (not bestDist or d < bestDist) then
-					best, bestDist = p, d
+-- ยกสัตว์ให้ไวที่สุด: เช็กทุกเฟรม, วาร์ปไปติดตัวสัตว์ (ระยะสั้น) แล้วกด Steal ทันที
+local function liftAnimal(eggPos, newPrompts, shouldStop)
+	local started, tried = os.clock(), 0
+	local slowScanAt = os.clock() + 1.5   -- ถ้า 1.5 วิยังไม่เจอ ค่อยสแกนทั้งแมพ (ช้า)
+	while os.clock() - started < CONFIG.LiftWait and not shouldStop() do
+		local best = bestLiftPrompt(newPrompts, eggPos)
+		if not best then
+			local pickups = workspace:FindFirstChild("AnimalPickups")
+			if pickups then
+				local list = {}
+				for _, p in ipairs(pickups:GetDescendants()) do
+					if p:IsA("ProximityPrompt") then table.insert(list, p) end
 				end
+				best = bestLiftPrompt(list, eggPos)
 			end
+		end
+		if not best and os.clock() > slowScanAt then
+			slowScanAt = os.clock() + 1
+			local list = {}
+			for _, p in ipairs(workspace:GetDescendants()) do
+				if p:IsA("ProximityPrompt") then table.insert(list, p) end
+			end
+			best = bestLiftPrompt(list, eggPos)
 		end
 
 		if best then
-			say("ยกสัตว์: กด", best.ActionText, best.ObjectText, "ที่", best:GetFullName())
+			if tried == 0 then say("ยกสัตว์: กด", best.ActionText, "ที่", best:GetFullName()) end
 			local _, root = getChar()
 			local pos = promptPos(best)
-			if root and pos then tweenTo(besideCFrame(pos, root, 2), shouldStop) end
+			if root and pos then
+				root.CFrame = besideCFrame(pos, root, 1.5)
+				root.AssemblyLinearVelocity = Vector3.zero
+			end
 			triggerPrompt(best)
 			tried += 1
-			task.wait(0.6)
-			-- ยกได้แล้ว = ปุ่ม Steal หาย/ถูกปิด หรือมีปุ่ม Drop ขึ้นมา
-			if not best.Parent or not best.Enabled or isCarrying() then
-				say("ยกสัตว์แล้ว")
-				return true
+			-- เช็กผลทุกเฟรม ไม่เกิน 0.3 วิ แล้วค่อยกดซ้ำ
+			local t = os.clock()
+			while os.clock() - t < 0.3 do
+				if not best.Parent or not best.Enabled or isCarrying() then
+					say(string.format("ยกสัตว์แล้ว (%.2f วิ, กด %d ครั้ง)", os.clock() - started, tried))
+					return true
+				end
+				task.wait()
 			end
+		else
+			task.wait()
 		end
-		task.wait(0.25)
 	end
 	say(tried > 0 and "กด Steal แล้วแต่ยังยกไม่ได้" or "ไม่เจอปุ่ม Steal ใกล้ไข่ที่ตีแตก")
 	return false
@@ -424,7 +441,7 @@ local function waitForGuardHit(guard, shouldStop)
 		local target = besideCFrame(guard:GetPivot().Position, r, 3)
 		r.CFrame = target
 		r.AssemblyLinearVelocity = Vector3.zero
-		task.wait(0.1)
+		task.wait()   -- เช็กทุกเฟรม
 		-- ถูกตีจนกระเด็น / ถูกย้ายตำแหน่ง
 		if r.Parent and (r.Position - target.Position).Magnitude > CONFIG.KnockbackDist then
 			log("ถูกกระเด็นออกจากจุดที่ยืน")
