@@ -37,7 +37,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r10"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r11"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -91,6 +91,7 @@ local State = {
 	FarmRun     = 0,
 	ReadyZone   = nil,
 	AutoSwingChar = nil,
+	GemRun      = 0,
 }
 
 ---------------------------------------------------------------------
@@ -543,37 +544,55 @@ function Callbacks.AutoFarm(on)
 	end
 end
 
--- เก็บเพชร: แตะชิ้นส่วนที่ชื่อมี Gem/Diamond ที่เกิดขึ้นในแมพ (ต้องมี firetouchinterest)
-local gemConn
-local function isGem(inst)
-	if not inst:IsA("BasePart") then return false end
-	local n = inst.Name:lower()
-	return n:find("gem") ~= nil or n:find("diamond") ~= nil
+-- เก็บเพชร: เพชรที่ตกจากไข่อยู่ใน workspace.EggGemDrops
+-- วิธีเก็บ: แตะเพชร (firetouchinterest ถ้ามี) + ดึงเพชรมาที่ตัวเรา
+local gemTried = setmetatable({}, { __mode = "k" })   -- เพชร -> เวลาที่ลองเก็บล่าสุด
+local gemLogged = false
+
+local function gemPart(g)
+	if g:IsA("BasePart") then return g end
+	return g:FindFirstChildWhichIsA("BasePart", true)
 end
 
-local function touchGem(part)
-	local _, root = getChar()
-	if not root or not part.Parent then return end
+local function collectGem(g, root)
+	local part = gemPart(g)
+	if not part then return end
+	if not gemLogged then
+		gemLogged = true
+		say("เจอเพชร:", g:GetFullName(), g.ClassName, "ชิ้นส่วน:", part.Name)
+	end
 	if firetouchinterest then
 		firetouchinterest(root, part, 0)
-		task.wait()
 		firetouchinterest(root, part, 1)
+	end
+	if g:IsA("Model") then
+		g:PivotTo(root.CFrame)
+	else
+		part.CFrame = root.CFrame
 	end
 end
 
 function Callbacks.CollectGems(on)
 	State.CollectGems = on
-	if on then
-		if not firetouchinterest then warn("[FarmHub] ตัวรันนี้ไม่มี firetouchinterest เก็บเพชรอัตโนมัติไม่ได้") end
-		gemConn = gemConn or workspace.DescendantAdded:Connect(function(inst)
-			if State.CollectGems and isGem(inst) then
-				if State.Debug then print("[FarmHub] เจอเพชร:", inst:GetFullName()) end
-				task.delay(0.2, touchGem, inst)
+	State.GemRun += 1
+	if not on then return end
+	local run = State.GemRun
+	local folder = workspace:FindFirstChild("EggGemDrops") or workspace:WaitForChild("EggGemDrops", 5)
+	if not folder then say("ไม่พบ workspace.EggGemDrops") return end
+	say("เปิดเก็บเพชร")
+	while State.CollectGems and State.GemRun == run do
+		local _, root = getChar()
+		if root then
+			local now = os.clock()
+			for _, g in ipairs(folder:GetChildren()) do
+				-- เพชรเดิมลองซ้ำได้ทุก 1 วิ (เผื่อรอบแรกเก็บไม่ติด)
+				if not gemTried[g] or now - gemTried[g] > 1 then
+					gemTried[g] = now
+					collectGem(g, root)
+				end
 			end
-		end)
-	elseif gemConn then
-		gemConn:Disconnect()
-		gemConn = nil
+		end
+		task.wait(0.1)
 	end
 end
 
@@ -970,8 +989,13 @@ makeDropdown(farmPage, "เลือกโซน", CONFIG.ZoneOrder, State.Zone,
 	Callbacks.ZoneChanged(zone)
 end)
 
-makeToggle(farmPage, "เริ่มฟาร์ม", false, Callbacks.AutoFarm)
-makeToggle(farmPage, "เก็บเพชร", false, Callbacks.CollectGems)
+-- เปิด/ปิดเริ่มฟาร์ม = เปิด/ปิดเก็บเพชรด้วย (ปิดเก็บเพชรแยกได้ ฟาร์มยังทำงานต่อ)
+local gemToggle
+makeToggle(farmPage, "เริ่มฟาร์ม", false, function(on)
+	if gemToggle then gemToggle.Set(on) end
+	Callbacks.AutoFarm(on)
+end)
+gemToggle = makeToggle(farmPage, "เก็บเพชร", false, Callbacks.CollectGems)
 
 eggDropdown = makeDropdown(farmPage, "เลือกไข่", eggTypesOf(State.Zone), State.Egg, function(egg)
 	State.Egg = egg
