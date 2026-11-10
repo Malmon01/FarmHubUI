@@ -30,7 +30,7 @@ local CONFIG = {
 	GemStay    = 0.6,              -- ยืนบนเพชรรอให้เก็บติดนานสุดกี่วินาที
 	TeleportRetries = 3,           -- วาร์ปซ้ำกี่ครั้งถ้าเกมดึงตัวกลับ
 	TeleportVia = { [13] = 12 },   -- โซนที่ไกลเกินวาร์ปตรง: วาร์ปไปโซนนี้ก่อน แล้ว Tween ต่อ
-	SwingConfirm = 0.4,             -- สีปุ่ม Auto Swing ต้องไม่ตรงกับที่ต้องการนานเท่านี้ถึงจะกด
+	SwingPressGap = 0.8,           -- กดปุ่ม Auto Swing แล้วรออย่างน้อยกี่วินาทีก่อนกดซ้ำ (รอปุ่มเปลี่ยนสี)
 	TweenSpeed = 300,              -- ความเร็ว Tween (studs/วินาที)
 	LiftWait   = 12,               -- รอสัตว์ออกจากไข่แล้วกด Steal นานสุดกี่วินาที
 	LiftRadius = 60,               -- หาปุ่ม Steal ในรัศมีนี้รอบไข่ที่ตีแตก
@@ -41,7 +41,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r21"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r22"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -293,27 +293,28 @@ end
 
 -- คุม Auto Swing ของเกมให้ตรงกับที่ต้องการ (State.SwingWant)
 --   เปิด = ยืนติดไข่ที่กำลังจะตีแล้ว, ปิด = ระหว่างเดินทาง / หลังไข่แตก
--- ปุ่มกะพริบสีได้ จึงกดเฉพาะเมื่อสีไม่ตรงกับที่ต้องการต่อเนื่อง CONFIG.SwingConfirm วิ
+-- กดทันทีเมื่อสถานะไม่ตรงกับที่ต้องการ (อ่านจาก AutoSwingColorAlpha ซึ่งแม่น)
 local lastObserved, dumps = "init", 0
-local lastSwingPress, mismatchSince = 0, nil
+local lastSwingPress = 0
 local function syncAutoSwing()
 	local btn = getAutoSwingBtn()
-	if not btn or not isShown(btn) then mismatchSince = nil return end
+	if not btn or not isShown(btn) then return end
 	local on = autoSwingIsOn(btn)
 	if on ~= lastObserved and dumps < 12 then   -- สถานะเปลี่ยน: บันทึกลงไฟล์ไว้ตรวจ
 		lastObserved, dumps = on, dumps + 1
 		dumpAutoSwing(btn)
 	end
-	if on == nil or on == State.SwingWant then mismatchSince = nil return end
-	mismatchSince = mismatchSince or os.clock()
-	if os.clock() - mismatchSince < CONFIG.SwingConfirm then return end
-	if os.clock() - lastSwingPress < 1 then return end   -- กดแล้วรอผลอย่างน้อย 1 วิ
-	lastSwingPress, mismatchSince = os.clock(), nil
+	if on == nil or on == State.SwingWant then return end
+	-- กดแล้วปุ่มต้องใช้เวลาเปลี่ยนสี (ค่า alpha ค่อย ๆ ขยับ) รอก่อนค่อยกดซ้ำ
+	if os.clock() - lastSwingPress < CONFIG.SwingPressGap then return end
+	lastSwingPress = os.clock()
 	log(State.SwingWant and "เปิด Auto Swing" or "ปิด Auto Swing")
 	pressButton(btn)
 end
 
+-- ตั้งสถานะที่ต้องการ แล้วกดทันที (ไม่ต้องรอ) ถ้าไม่ตรง
 local function setSwing(on)
+	if State.SwingWant ~= on then lastSwingPress = 0 end
 	State.SwingWant = on
 	syncAutoSwing()
 end
@@ -499,29 +500,31 @@ end
 local grabNearbyGems   -- กำหนดในส่วนเก็บเพชรด้านล่าง
 
 -- Tween ไปข้างไข่ แล้วตีจนแตก
-local function breakEgg(egg, shouldStop)
+local function breakEgg(egg, shouldStop, skipGems)
 	local _, root = getChar()
 	getTool()          -- ถือที่ขุดไว้ (ปุ่ม Auto Swing จะโผล่)
 	setSwing(false)    -- ระหว่างเดินทางไปไข่: ปิด
 	if not root or not tweenTo(eggCFrame(egg, root), shouldStop) then return false end
-	setSwing(true)     -- ถึงไข่แล้ว: เปิด
+	setSwing(true)     -- ถึงไข่เป้าหมายแล้ว: เปิด
 	log("ตีไข่:", egg:GetAttribute("EggType"), "HP", egg:GetAttribute("Health"))
-	local started = os.clock()
+	local started, lastActivate = os.clock(), 0
 	while eggAlive(egg) and not shouldStop() and os.clock() - started < CONFIG.EggTimeout do
 		local _, r = getChar()
-		local tool = getTool()
 		if r then
 			r.CFrame = eggCFrame(egg, r)
 			r.AssemblyLinearVelocity = Vector3.zero
 		end
-		if State.CollectGems and grabNearbyGems then grabNearbyGems(shouldStop) end   -- เก็บเพชรใกล้ตัวระหว่างตี
-		if tool then
-			syncAutoSwing()
-			tool:Activate()   -- สำรอง เผื่อ Auto Swing ไม่ทำงาน
+		syncAutoSwing()
+		if os.clock() - lastActivate > CONFIG.HitDelay then
+			lastActivate = os.clock()
+			local tool = getTool()
+			if tool then tool:Activate() end   -- สำรอง เผื่อ Auto Swing ไม่ทำงาน
 		end
-		task.wait(CONFIG.HitDelay)
+		task.wait()   -- เช็กทุกเฟรม: ไข่แตกปุ๊บ ไปต่อทันที
 	end
-	setSwing(false)        -- ไข่แตก (หรือหยุด): ปิด
+	setSwing(false)        -- ไข่เป้าหมายแตก (หรือหยุด): ปิดทันที กันตีโดนไข่ใบอื่น
+	-- เพชรตกตอนไข่แตก: เก็บตอนนี้ (Auto Swing ปิดแล้ว)
+	if not skipGems and State.CollectGems and grabNearbyGems then grabNearbyGems(shouldStop) end
 	return not eggAlive(egg)
 end
 
@@ -700,7 +703,7 @@ local function warmUp(shouldStop)
 	say("ขั้นที่ 1: ขุดไข่ใน", zoneName)
 	local eggPos = egg.Position
 	local newPrompts, stopWatching = watchNewPrompts()
-	breakEgg(egg, shouldStop)
+	breakEgg(egg, shouldStop, true)   -- ขั้นเตรียม: ไม่เก็บเพชร รีบยกสัตว์
 	if not shouldStop() then
 		say("ขั้นที่ 2: ยกสัตว์")
 		liftAnimal(eggPos, newPrompts, shouldStop)
