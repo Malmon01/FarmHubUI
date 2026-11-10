@@ -27,8 +27,10 @@ local CONFIG = {
 	HitDelay   = 0.15,             -- เวลาระหว่างการตีแต่ละครั้ง (วินาที)
 	EggTimeout = 20,               -- ตีไข่ใบเดียวนานสุดกี่วินาที แล้วข้ามไปใบอื่น
 	GemRadius  = 60,               -- เก็บเพชรเฉพาะที่อยู่ใกล้ตัวในรัศมีนี้ (studs)
-	GemStay    = 0.15,             -- ยืนบนเพชรกี่วินาทีให้เก็บติด
+	GemStay    = 0.6,              -- ยืนบนเพชรรอให้เก็บติดนานสุดกี่วินาที
 	TeleportRetries = 3,           -- วาร์ปซ้ำกี่ครั้งถ้าเกมดึงตัวกลับ
+	TeleportVia = { [13] = 12 },   -- โซนที่ไกลเกินวาร์ปตรง: วาร์ปไปโซนนี้ก่อน แล้ว Tween ต่อ
+	RagdollWait = 3,               -- หลังโดนผู้พิทักษ์ตี รอตัวละครลุกขึ้นนานสุดกี่วินาที
 	TweenSpeed = 300,              -- ความเร็ว Tween (studs/วินาที)
 	LiftWait   = 12,               -- รอสัตว์ออกจากไข่แล้วกด Steal นานสุดกี่วินาที
 	LiftRadius = 60,               -- หาปุ่ม Steal ในรัศมีนี้รอบไข่ที่ตีแตก
@@ -39,7 +41,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r12"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-10 r13"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -268,6 +270,13 @@ local function tweenTo(cf, shouldStop)
 		root.AssemblyLinearVelocity = Vector3.zero
 		root.AssemblyAngularVelocity = Vector3.zero
 	end)
+	-- Noclip ระหว่าง Tween: ทะลุกำแพง/สิ่งกีดขวาง
+	local char = root.Parent
+	local noclip = RunService.Stepped:Connect(function()
+		for _, p in ipairs(char:GetDescendants()) do
+			if p:IsA("BasePart") then p.CanCollide = false end
+		end
+	end)
 	local tween = TweenService:Create(root, TweenInfo.new(t, Enum.EasingStyle.Linear), { CFrame = cf })
 	local done = false
 	local c = tween.Completed:Connect(function() done = true end)
@@ -276,6 +285,7 @@ local function tweenTo(cf, shouldStop)
 	if not done then tween:Cancel() end
 	c:Disconnect()
 	hold:Disconnect()
+	noclip:Disconnect()
 	return done
 end
 
@@ -294,7 +304,7 @@ local function breakEgg(egg, shouldStop)
 			r.CFrame = eggCFrame(egg, r)
 			r.AssemblyLinearVelocity = Vector3.zero
 		end
-		if State.CollectGems and grabNearbyGems then grabNearbyGems() end   -- เก็บเพชรใกล้ตัวระหว่างตี
+		if State.CollectGems and grabNearbyGems then grabNearbyGems(shouldStop) end   -- เก็บเพชรใกล้ตัวระหว่างตี
 		if tool then
 			ensureAutoSwing()
 			tool:Activate()   -- สำรอง เผื่อ Auto Swing ไม่ทำงาน
@@ -345,8 +355,14 @@ local function watchNewPrompts()
 end
 
 -- ขั้นตอนสำคัญจะพิมพ์ลง F9 เสมอ (ไม่ต้องเปิดโหมดดีบัก)
+local statusLabel   -- ช่องสถานะบนหน้าฟาร์ม (สร้างตอนทำ UI)
 local function say(...)
 	print("[FarmHub]", ...)
+	if statusLabel then
+		local parts = {}
+		for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+		statusLabel.Text = "สถานะ: " .. table.concat(parts, " ")
+	end
 end
 
 local function bestLiftPrompt(list, eggPos)
@@ -480,28 +496,68 @@ local function warmUp(shouldStop)
 	local hit = waitForGuardHit(guard, shouldStop)
 	say(hit and "ผู้พิทักษ์ตีแล้ว" or "หมดเวลารอผู้พิทักษ์")
 	if not getChar() then player.CharacterAdded:Wait() task.wait(1) end   -- ถ้าตาย รอเกิดใหม่
+
+	-- รอตัวละครลุกจากการล้ม (ragdoll) ก่อนวาร์ป ไม่งั้นตัวจะยืด
+	local ragdollStates = {
+		[Enum.HumanoidStateType.Physics] = true,
+		[Enum.HumanoidStateType.Ragdoll] = true,
+		[Enum.HumanoidStateType.FallingDown] = true,
+		[Enum.HumanoidStateType.GettingUp] = true,
+		[Enum.HumanoidStateType.PlatformStanding] = true,
+	}
+	local t = os.clock()
+	local _, _, hum = getChar()
+	if hum and ragdollStates[hum:GetState()] then say("รอตัวละครลุกขึ้น") end
+	while os.clock() - t < CONFIG.RagdollWait do
+		_, _, hum = getChar()
+		if hum and not ragdollStates[hum:GetState()] and not hum.PlatformStand then break end
+		task.wait()
+	end
 end
 
--- วาร์ปทันที (ไม่ใช่ Tween) ไปข้างไข่ในโซนที่เลือก ถ้ายังไม่เห็นไข่ วาร์ปไปกลางโซน
--- ถ้าเกมดึงตัวกลับ จะวาร์ปซ้ำ (สูงสุด CONFIG.TeleportRetries ครั้ง)
-local function teleportToZone(zoneName)
+-- ตำแหน่งปลายทางในโซน: ข้างไข่ (ถ้าเห็นไข่แล้ว) หรือกลางโซน
+local function zoneTarget(zoneName, root)
+	local egg = findEgg(zoneName, State.Egg) or findEgg(zoneName, ALL_EGGS)
+	if egg then return eggCFrame(egg, root) end
 	local zone = CONFIG.ZoneModels[zoneName]
+	return zone and (zone:GetPivot() + Vector3.new(0, 5, 0))
+end
+
+-- วาร์ปทันทีไปโซน (ถ้าเกมดึงตัวกลับ จะวาร์ปซ้ำ สูงสุด CONFIG.TeleportRetries ครั้ง)
+local function teleportInto(zoneName)
 	for attempt = 1, CONFIG.TeleportRetries do
 		local _, root = getChar()
-		if not root or not zone then return false end
-		local egg = findEgg(zoneName, State.Egg) or findEgg(zoneName, ALL_EGGS)
-		local target = egg and eggCFrame(egg, root) or (zone:GetPivot() + Vector3.new(0, 5, 0))
+		if not root then return false end
+		local target = zoneTarget(zoneName, root)
+		if not target then return false end
 		root.CFrame = target
 		root.AssemblyLinearVelocity = Vector3.zero
 		task.wait(0.4)
-		if root.Parent and (root.Position - target.Position).Magnitude < 40 then
-			say("วาร์ปถึงแล้ว (ครั้งที่ " .. attempt .. ")")
-			if not egg then task.wait(0.5) end   -- รอไข่ในโซนโหลด
-			return true
-		end
+		if root.Parent and (root.Position - target.Position).Magnitude < 40 then return true end
 		say("เกมดึงตัวกลับหลังวาร์ป ลองใหม่ (ครั้งที่ " .. attempt .. ")")
 	end
 	return false
+end
+
+-- ไปโซนที่เลือก: ถ้าโซนนั้นไกลเกินวาร์ปตรง (CONFIG.TeleportVia) วาร์ปไปโซนก่อนหน้าก่อน แล้ว Tween ต่อ
+local function goToZone(zoneName, shouldStop)
+	local num = tonumber(zoneName:match("(%d+)"))
+	local viaNum = num and CONFIG.TeleportVia[num]
+	if viaNum then
+		local via = "โซนที่ " .. viaNum
+		say("วาร์ปไป", via, "ก่อน")
+		teleportInto(via)
+		local _, root = getChar()
+		local target = root and zoneTarget(zoneName, root)
+		if target then
+			say("Tween ต่อไป", zoneName)
+			tweenTo(target, shouldStop)
+		end
+	else
+		say("วาร์ปไป", zoneName)
+		teleportInto(zoneName)
+	end
+	task.wait(0.3)   -- รอไข่ในโซนโหลด
 end
 
 ---------------------------------------------------------------------
@@ -535,8 +591,8 @@ function Callbacks.AutoFarm(on)
 			warmUp(stopped)
 			if stopped() then break end
 			State.ReadyZone = target
-			say("ขั้นที่ 4: วาร์ปไปฟาร์มที่", target)
-			teleportToZone(target)   -- วาร์ปทันที แล้วเริ่มฟาร์ม (ไข่ใบต่อ ๆ ไปใช้ Tween)
+			say("ขั้นที่ 4: ไปฟาร์มที่", target)
+			goToZone(target, stopped)   -- วาร์ป (โซนไกลวาร์ปผ่านโซนก่อนหน้า) แล้วเริ่มฟาร์ม
 		else
 			local egg = findEgg(State.Zone, State.Egg)
 			if egg then
@@ -581,34 +637,48 @@ local function nearbyGems(root)
 	return list
 end
 
-grabNearbyGems = function()
-	local _, root = getChar()
-	if not root then return end
-	local gems = nearbyGems(root)
-	if #gems == 0 then return end
-	local back = root.CFrame
+-- เก็บเพชรแบบสคริปต์รุ่นก่อน: Tween (Noclip) ไปหาเพชรที่ตกใกล้ตัวทีละเม็ด จนหมด
+local gemSkip = setmetatable({}, { __mode = "k" })   -- เพชรที่เก็บไม่ติด -> ข้ามไปก่อนจนถึงเวลานี้
+grabNearbyGems = function(shouldStop)
 	local got = 0
-	for _, g in ipairs(gems) do
-		local part = gemPart(g)
-		if part and part.Parent then
-			if not gemLogged then gemLogged = true describeGem(g) end
-			root.CFrame = CFrame.new(part.Position)
-			root.AssemblyLinearVelocity = Vector3.zero
-			if firetouchinterest then
-				firetouchinterest(root, part, 0)
-				firetouchinterest(root, part, 1)
+	while not (shouldStop and shouldStop()) do
+		local _, root = getChar()
+		if not root then break end
+		-- เพชรเม็ดที่ใกล้ที่สุด (ข้ามเม็ดที่เพิ่งเก็บไม่ติด)
+		local best, bestDist
+		for _, g in ipairs(nearbyGems(root)) do
+			local part = gemPart(g)
+			if part and not (gemSkip[g] and os.clock() < gemSkip[g]) then
+				local d = (part.Position - root.Position).Magnitude
+				if not bestDist or d < bestDist then best, bestDist = g, d end
 			end
-			local prompt = g:FindFirstChildWhichIsA("ProximityPrompt", true)
-			if prompt then triggerPrompt(prompt) end
-			-- ยืนบนเพชรสักครู่ ให้เซิร์ฟเวอร์เห็นว่าเราแตะแล้ว
-			local t = os.clock()
-			while g.Parent and os.clock() - t < CONFIG.GemStay do task.wait() end
-			if not g.Parent then got += 1 end
+		end
+		if not best then break end
+
+		local part = gemPart(best)
+		if not gemLogged then gemLogged = true describeGem(best) end
+		if got == 0 then say("เก็บเพชร: ไปหาเพชรที่ตก") end
+		tweenTo(CFrame.new(part.Position), shouldStop)
+		root.AssemblyLinearVelocity = Vector3.zero
+		if firetouchinterest and part.Parent then
+			firetouchinterest(root, part, 0)
+			firetouchinterest(root, part, 1)
+		end
+		local prompt = best:FindFirstChildWhichIsA("ProximityPrompt", true)
+		if prompt then triggerPrompt(prompt) end
+		-- ยืนบนเพชรจนเพชรหาย (ไม่เกิน GemStay วิ)
+		local t = os.clock()
+		while best.Parent and os.clock() - t < CONFIG.GemStay do
+			if part.Parent then root.CFrame = CFrame.new(part.Position) end
+			task.wait()
+		end
+		if best.Parent then
+			gemSkip[best] = os.clock() + 3
+		else
+			got += 1
 		end
 	end
-	root.CFrame = back
-	root.AssemblyLinearVelocity = Vector3.zero
-	log(string.format("เก็บเพชร %d/%d เม็ด", got, #gems))
+	if got > 0 then say("เก็บเพชรได้", got, "เม็ด") end
 end
 
 -- ตอนเปิดฟาร์ม ระบบฟาร์มจะเรียกเก็บเพชรเองระหว่างตีไข่
@@ -620,7 +690,7 @@ function Callbacks.CollectGems(on)
 	local run = State.GemRun
 	say("เปิดเก็บเพชร (รัศมี " .. CONFIG.GemRadius .. " studs)")
 	while State.CollectGems and State.GemRun == run do
-		if not State.AutoFarm then grabNearbyGems() end
+		if not State.AutoFarm then grabNearbyGems(function() return not State.CollectGems or State.AutoFarm end) end
 		task.wait(0.2)
 	end
 end
@@ -1034,6 +1104,10 @@ makeButton(farmPage, "รีเฟรชรายชื่อไข่", functio
 	eggDropdown.SetOptions(eggTypesOf(State.Zone))
 end)
 makeNote(farmPage, "* รายการไข่จะเปลี่ยนตามโซนที่เลือก")
+statusLabel = label(farmPage, "สถานะ: พร้อม", {
+	Size = UDim2.new(1, 0, 0, 20), LayoutOrder = nextOrder(),
+	TextSize = 13, TextColor3 = C.Accent, TextTruncate = Enum.TextTruncate.AtEnd,
+})
 makeToggle(farmPage, "โหมดดีบัก (ดูผลใน F9)", false, Callbacks.Debug)
 
 -- 2) หาตัว
