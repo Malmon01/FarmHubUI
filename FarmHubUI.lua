@@ -454,8 +454,23 @@ local function warmUp(shouldStop)
 	say("ขั้นที่ 3: พุ่งไปหาผู้พิทักษ์", guard.Name)
 	local hit = waitForGuardHit(guard, shouldStop)
 	say(hit and "ผู้พิทักษ์ตีแล้ว" or "หมดเวลารอผู้พิทักษ์")
-	task.wait(1)
 	if not getChar() then player.CharacterAdded:Wait() task.wait(1) end   -- ถ้าตาย รอเกิดใหม่
+end
+
+-- วาร์ปทันที (ไม่ใช่ Tween) ไปข้างไข่ในโซนที่เลือก ถ้ายังไม่เห็นไข่ วาร์ปไปกลางโซน
+local function teleportToZone(zoneName)
+	local _, root = getChar()
+	if not root then return end
+	local egg = findEgg(zoneName, State.Egg) or findEgg(zoneName, ALL_EGGS)
+	if egg then
+		root.CFrame = eggCFrame(egg, root)
+	else
+		local zone = CONFIG.ZoneModels[zoneName]
+		if not zone then return end
+		root.CFrame = zone:GetPivot() + Vector3.new(0, 5, 0)
+		task.wait(0.5)   -- รอไข่ในโซนโหลด
+	end
+	root.AssemblyLinearVelocity = Vector3.zero
 end
 
 ---------------------------------------------------------------------
@@ -472,7 +487,7 @@ function Callbacks.EggChanged(egg)
 end
 
 -- ฟาร์ม: ทุกครั้งที่เริ่ม/เปลี่ยนโซน จะทำขั้นเตรียม (warmUp) ก่อน
--- แล้วค่อย Tween ไปโซนที่เลือก ตีไข่ที่ใกล้ที่สุดไปเรื่อย ๆ
+-- โดนผู้พิทักษ์ตีแล้ววาร์ปทันทีไปโซนที่เลือก จากนั้น Tween ไปตีไข่ที่ใกล้ที่สุดไปเรื่อย ๆ
 function Callbacks.AutoFarm(on)
 	State.AutoFarm = on
 	State.FarmRun += 1
@@ -487,8 +502,10 @@ function Callbacks.AutoFarm(on)
 		elseif State.ReadyZone ~= State.Zone then
 			local target = State.Zone
 			warmUp(stopped)
+			if stopped() then break end
 			State.ReadyZone = target
-			say("ขั้นที่ 4: ไปฟาร์มที่", target)
+			say("ขั้นที่ 4: วาร์ปไปฟาร์มที่", target)
+			teleportToZone(target)   -- วาร์ปทันที แล้วเริ่มฟาร์ม (ไข่ใบต่อ ๆ ไปใช้ Tween)
 		else
 			local egg = findEgg(State.Zone, State.Egg)
 			if egg then
