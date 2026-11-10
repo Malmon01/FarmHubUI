@@ -186,16 +186,37 @@ local pageTitle = label(content, "", {
 	TextSize = 20, Font = Enum.Font.GothamBold,
 })
 
--- Logo (วงกลมมุมขวาบน)
-local logo = create("ImageLabel", {
-	AnchorPoint = Vector2.new(1, 0),
-	Position = UDim2.new(1, -40, 0, 10), Size = UDim2.fromOffset(56, 56),
-	BackgroundColor3 = C.Row, Image = CONFIG.LogoImage, Parent = content,
+-- Logo (วงกลม) = แสดงโลโก้ + เป็นปุ่ม
+local function makeLogo(parent, size, props)
+	local p = {
+		Size = UDim2.fromOffset(size, size), BackgroundColor3 = C.Row,
+		Image = CONFIG.LogoImage, AutoButtonColor = false, Parent = parent,
+	}
+	for k, v in pairs(props or {}) do p[k] = v end
+	local b = create("ImageButton", p)
+	corner(b, size / 2)
+	local stroke = create("UIStroke", { Color = C.Accent, Thickness = 2, Parent = b })
+	if CONFIG.LogoImage == "" then
+		label(b, "Logo", { Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center, TextSize = 14 })
+	end
+	b.MouseEnter:Connect(function() tween(stroke, { Thickness = 3 }) end)
+	b.MouseLeave:Connect(function() tween(stroke, { Thickness = 2 }) end)
+	return b
+end
+
+-- โลโก้มุมขวาบนในหน้าต่าง: กดเพื่อย่อหน้าต่าง
+local logo = makeLogo(content, 56, {
+	AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -40, 0, 10),
 })
-corner(logo, 28)
-create("UIStroke", { Color = C.Accent, Thickness = 2, Parent = logo })
-if CONFIG.LogoImage == "" then
-	label(logo, "Logo", { Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center, TextSize = 14 })
+
+-- โลโก้ลอย (โชว์ตอนย่อ): กดเพื่อเปิดหน้าต่างกลับ, ลากย้ายได้
+local floatLogo = makeLogo(gui, 60, {
+	Position = UDim2.new(0, 20, 0.5, -30), Visible = false,
+})
+
+local function setMinimized(min)
+	main.Visible = not min
+	floatLogo.Visible = min
 end
 
 -- ปุ่มปิด
@@ -435,12 +456,13 @@ selectTab(tabs[1])
 ---------------------------------------------------------------------
 -- Drag + hotkey
 ---------------------------------------------------------------------
-do
-	local dragging, dragStart, startPos
-	main.InputBegan:Connect(function(input)
+-- ทำให้ลากได้ คืนค่าฟังก์ชันเช็กว่าเพิ่งลากไปหรือเปล่า (กันกดติดตอนลากเสร็จ)
+local function makeDraggable(frame)
+	local dragging, dragStart, startPos, moved
+	frame.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch then
-			dragging, dragStart, startPos = true, input.Position, main.Position
+			dragging, dragStart, startPos, moved = true, input.Position, frame.Position, false
 			input.Changed:Connect(function()
 				if input.UserInputState == Enum.UserInputState.End then dragging = false end
 			end)
@@ -450,13 +472,23 @@ do
 		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
 			or input.UserInputType == Enum.UserInputType.Touch) then
 			local d = input.Position - dragStart
-			main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+			if d.Magnitude > 4 then moved = true end
+			frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
 		end
 	end)
+	return function() return moved end
 end
+
+makeDraggable(main)
+local floatMoved = makeDraggable(floatLogo)
+
+logo.MouseButton1Click:Connect(function() setMinimized(true) end)
+floatLogo.MouseButton1Click:Connect(function()
+	if not floatMoved() then setMinimized(false) end
+end)
 
 UIS.InputBegan:Connect(function(input, processed)
 	if not processed and input.KeyCode == CONFIG.ToggleKey then
-		main.Visible = not main.Visible
+		setMinimized(main.Visible)
 	end
 end)
