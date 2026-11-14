@@ -44,7 +44,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-14 r34"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-14 r35"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- อ่านเงินทั้งค่าที่พิมพ์และข้อความเหนือหัวสัตว์ (แยกหน่วยยาวก่อน)
@@ -433,7 +433,7 @@ local function setSwing(on)
 	syncAutoSwing()
 end
 
--- เช็กสัตว์ที่อยู่ใกล้หรือเชื่อมกับตัวเรา ใช้ปุ่ม Drop สำรองเมื่อไม่มีโฟลเดอร์เท่านั้น
+-- เช็กสัตว์ที่อยู่ใกล้หรือเชื่อมกับตัวเรา และใช้ปุ่ม Drop ช่วยยืนยัน
 local function carriedAnimal()
 	local folder = workspace:FindFirstChild("CarriedAnimals")
 	local char, root = getChar()
@@ -454,13 +454,15 @@ local function carriedAnimal()
 	end
 end
 local dropBtn, dropScanAt = nil, 0
-local function isCarrying()
-	if workspace:FindFirstChild("CarriedAnimals") then return carriedAnimal() ~= nil end
+local function dropButtonShown()
 	if dropBtn and dropBtn.Parent then return isShown(dropBtn) end
 	if os.clock() < dropScanAt then return false end
 	dropScanAt = os.clock() + 0.3
 	dropBtn = findGuiButton("Drop", true)
-	return dropBtn ~= nil
+	return dropBtn ~= nil and isShown(dropBtn)
+end
+local function isCarrying()
+	return carriedAnimal() ~= nil or dropButtonShown()
 end
 
 -- ไข่ที่เกมยืนยันว่าเลือดหมดแล้ว (จาก EggHitConfirmed) รู้ก่อน Attribute อัปเดต จะได้ไปใบต่อไปทันที
@@ -1868,7 +1870,7 @@ local function finderSay(text)
 	say(text)
 end
 
--- ยืนยันตัวเดิมจากอ้างอิงโมเดล และจับคู่จุดกดที่อยู่ใกล้รากที่สุด
+-- ตรวจว่าโมเดลยังอยู่ในโฟลเดอร์สัตว์ และจับคู่จุดกดที่อยู่ใกล้รากที่สุด
 local function animalPresent(animal)
 	local folder = workspace:FindFirstChild("AnimalPickups")
 	return folder and animal.Parent == folder
@@ -1953,77 +1955,120 @@ local function chooseAnimal()
 end
 
 local function stealSameAnimal(animal, timeout, immediate, shouldStop, reselect)
-	-- เวลาเดินทางรอบแรกแยกจากเวลารอกดเก็บ ส่วนรอบล้มต้องเก็บตัวเดิมทันที
+	-- เก็บตัวตนแยกจากโมเดล เพราะเกมสร้างโมเดลใหม่เมื่อสัตว์ตก
+	local hatchId = animal:GetAttribute("HatchId")
+	local targetName = animal:GetAttribute("AnimalName")
+	local animalRoot = animal:FindFirstChild("RootPart")
+	local _, root = getChar()
+	local nearPos = immediate and root and root.Position or (animalRoot and animalRoot.Position)
+	local selectedAnimal = animal
+	local function findAnimalByHatch(hatchId, nearPos)
+		local folder = workspace:FindFirstChild("AnimalPickups")
+		if not folder then return end
+		local nearest, bestDistance = nil, 40
+		for _, candidate in ipairs(folder:GetChildren()) do
+			if candidate:IsA("Model") then
+				if candidate:GetAttribute("HatchId") == hatchId then return candidate end
+				local part = candidate:FindFirstChild("RootPart")
+				if nearPos and part and part:IsA("BasePart") and candidate:GetAttribute("AnimalName") == targetName then
+					local distance = (part.Position - nearPos).Magnitude
+					if distance <= bestDistance then nearest, bestDistance = candidate, distance end
+				end
+			end
+		end
+		return nearest
+	end
+	local function logTimeout()
+		local current = findAnimalByHatch(hatchId, nearPos)
+		local prompt = current and animalPrompt(current)
+		local _, currentRoot = getChar()
+		local distance = prompt and currentRoot and (promptPos(prompt) - currentRoot.Position).Magnitude
+		local folder = workspace:FindFirstChild("CarriedAnimals")
+		finderSay("หมดเวลายก " .. tostring(targetName) .. " HatchId=" .. tostring(hatchId)
+			.. " พบจุด StealPrompt=" .. tostring(prompt ~= nil)
+			.. " ระยะ=" .. (distance and string.format("%.1f", distance) or "ไม่ทราบ")
+			.. " จำนวนใน CarriedAnimals=" .. tostring(folder and #folder:GetChildren() or 0)
+			.. " แสดงปุ่ม Drop=" .. tostring(dropButtonShown()))
+	end
+	-- เวลาเดินทางรอบแรกแยกจากเวลารอกดเก็บ
 	if isCarrying() then return false end
-	if not immediate then
+	animal = findAnimalByHatch(hatchId, nearPos)
+	if not immediate and animal then
 		local prompt = animalPrompt(animal)
-		local _, root = getChar()
-		if not prompt or not root then return false end
-		if not tweenTo(onGround(besideCFrame(promptPos(prompt), root, 2), animal), shouldStop) then return false end
+		if prompt and root then
+			if not tweenTo(onGround(besideCFrame(promptPos(prompt), root, 2), animal), shouldStop) then return false end
+		end
 	end
 	local started, destination = os.clock(), nil
+	local lastPress, wrongSince = -math.huge, nil
+	local appeared = false
 	local function timedOut() return shouldStop() or os.clock() - started >= timeout end
 	while not timedOut() do
-		if isCarrying() then return false end
-		if not animalPresent(animal) and not reselect then return false end
-		local _, root = getChar()
-		if not root then return false end
-		local prompt = animalPrompt(animal)
-		if prompt then
-			local cf = besideCFrame(promptPos(prompt), root, 2)
-			if immediate then root.CFrame = cf
-			elseif (root.Position - cf.Position).Magnitude > 4 then
-				if not tweenTo(onGround(cf, animal), timedOut) then return false end
+		local carried = carriedAnimal()
+		if isCarrying() then
+			local carriedHatch = carried and carried:GetAttribute("HatchId")
+			if carriedHatch == nil or carriedHatch == hatchId then return true, carried or selectedAnimal, destination end
+			wrongSince = wrongSince or os.clock()
+			-- เผื่อโฟลเดอร์ฝั่งเซิร์ฟเวอร์อัปเดตคนละเฟรม
+			if os.clock() - wrongSince >= 0.3 then
+				finderSay("ยกผิดตัว " .. tostring(carried:GetAttribute("AnimalName") or carried.Name)
+					.. " วางสัตว์และยกเลิกการส่ง")
+				local drop = ReplicatedStorage:FindFirstChild("DropCarriedRemote", true)
+				if drop and drop:IsA("RemoteEvent") then drop:FireServer() end
+				return false
 			end
-		end
-		if timedOut() then return false end
-		-- เลือกค่าสูงสุดอีกครั้งหลังเดินทาง ก่อนกดจริงโดยไม่มีการรอคั่น
-		if reselect then
-			local candidate
-			candidate, destination = chooseAnimal()
-			if not candidate then return false end
-			if candidate.Animal ~= animal then
-				animal = candidate.Animal
-				continue
-			end
-		end
-		prompt = animalPrompt(animal)
-		if prompt then
-			-- ยืนติดจุดกดที่จับคู่ใหม่ เพื่อไม่ให้คีย์ E ไปโดนตัวข้าง ๆ
-			root.CFrame = besideCFrame(promptPos(prompt), root, 2)
-			root.AssemblyLinearVelocity = Vector3.zero
-			if isCarrying() then return false end
-			local cps, _, cashText = animalDetails(animal)
-			finderSay("เลือก " .. tostring(animal:GetAttribute("AnimalName") or animal.Name)
-				.. " " .. (cashText or ("$" .. string.format("%.6g", cps) .. "/s")))
-			triggerPrompt(prompt)
-			-- กดครั้งเดียวแล้วรอผล ห้ามกดซ้ำระหว่างรอข้อมูลจากเซิร์ฟเวอร์
-			local wrongSince
-			local verifyStarted = os.clock()
-			repeat
-				local carried = carriedAnimal()
-				local folder = workspace:FindFirstChild("CarriedAnimals")
-				local targetCarried = folder and animal:IsDescendantOf(folder)
-				if isCarrying() then
-					if targetCarried or not animalPresent(animal) then return true, animal, destination end
-					wrongSince = wrongSince or os.clock()
-					-- เผื่อโฟลเดอร์ฝั่งเซิร์ฟเวอร์อัปเดตคนละเฟรม
-					if os.clock() - wrongSince >= 0.3 then
-						finderSay("ยกผิดตัว " .. tostring(carried and (carried:GetAttribute("AnimalName") or carried.Name) or "ไม่ทราบชื่อ")
-							.. " วางสัตว์และยกเลิกการส่ง")
-						local drop = ReplicatedStorage:FindFirstChild("DropCarriedRemote", true)
-						if drop and drop:IsA("RemoteEvent") then drop:FireServer() end
+		else
+			wrongSince = nil
+			animal = findAnimalByHatch(hatchId, nearPos)
+			if animal then appeared = true end
+			-- รอโมเดลที่ตกปรากฏได้สองวินาที โดยค้นหาใหม่ทุกเฟรม
+			if immediate and not appeared and os.clock() - started >= 2 then break end
+			local _, currentRoot = getChar()
+			if not currentRoot then return false end
+			local prompt = animal and animalPrompt(animal)
+			if prompt then
+				local cf = besideCFrame(promptPos(prompt), currentRoot, 2)
+				if immediate then currentRoot.CFrame = cf
+				elseif (currentRoot.Position - cf.Position).Magnitude > 4 then
+					if not tweenTo(onGround(cf, animal), timedOut) then
+						if not shouldStop() then logTimeout() end
 						return false
 					end
-				else
-					wrongSince = nil
 				end
-				task.wait(0.05)
-			until shouldStop() or os.clock() - verifyStarted >= timeout
-			return false
+			end
+			if timedOut() then break end
+			-- เลือกค่าสูงสุดอีกครั้งหลังเดินทาง แล้วล็อก HatchId ตั้งแต่กดครั้งแรก
+			if reselect and lastPress == -math.huge then
+				local candidate
+				candidate, destination = chooseAnimal()
+				if not candidate then return false end
+				local nextHatch = candidate.Animal:GetAttribute("HatchId")
+				if nextHatch ~= hatchId then
+					selectedAnimal = candidate.Animal
+					hatchId, targetName = nextHatch, selectedAnimal:GetAttribute("AnimalName")
+					local part = selectedAnimal:FindFirstChild("RootPart")
+					nearPos = part and part.Position
+					continue
+				end
+			end
+			animal = findAnimalByHatch(hatchId, nearPos)
+			prompt = animal and animalPrompt(animal)
+			if prompt and not isCarrying() and os.clock() - lastPress >= 0.35 then
+				-- ยืนติดจุดกดและกดซ้ำจนกว่าเซิร์ฟเวอร์จะยืนยันว่าถือแล้ว
+				currentRoot.CFrame = besideCFrame(promptPos(prompt), currentRoot, 2)
+				currentRoot.AssemblyLinearVelocity = Vector3.zero
+				if lastPress == -math.huge then
+					local cps, _, cashText = animalDetails(animal)
+					finderSay("เลือก " .. tostring(targetName)
+						.. " " .. (cashText or ("$" .. string.format("%.6g", cps) .. "/s")))
+				end
+				lastPress = os.clock()
+				triggerPrompt(prompt)
+			end
 		end
-		task.wait(0.05)
+		task.wait()
 	end
+	if not shouldStop() then logTimeout() end
 	return false
 end
 
