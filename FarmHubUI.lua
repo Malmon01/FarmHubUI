@@ -44,7 +44,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-14 r36"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-14 r37"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- อ่านเงินทั้งค่าที่พิมพ์และข้อความเหนือหัวสัตว์ (แยกหน่วยยาวก่อน)
@@ -657,6 +657,13 @@ end
 
 local grabNearbyGems     -- กำหนดในส่วนเก็บเพชรด้านล่าง
 local hasCollectableGems -- กำหนดในส่วนเก็บเพชรด้านล่าง
+local isNearZone         -- กำหนดในส่วนตรวจโซนด้านล่าง
+
+-- ระหว่างฟาร์ม เก็บเพชรได้เมื่อถึงโซนที่เลือกแล้วเท่านั้น
+local function canCollectGems()
+	return not State.DeliveryBusy and not State.Closed
+		and (not State.AutoFarm or (State.ReadyZone == State.Zone and isNearZone(State.Zone)))
+end
 
 -- ตีไข่ตรง ๆ แบบที่ MYHUB ทำ (ไม่ใช้ปุ่ม Auto Swing ของเกม จึงไม่ตีโดนไข่ใบอื่น)
 --   ReplicatedStorage.MasteryPickaxeSwing:FireServer()
@@ -693,7 +700,7 @@ end
 -- Tween ไปข้างไข่ แล้วตีจนแตก
 -- มีเพชรตกอยู่ในโซนเป้าหมายไหม
 local function gemsAround()
-	return hasCollectableGems ~= nil and hasCollectableGems(CONFIG.GemRadius)
+	return canCollectGems() and hasCollectableGems ~= nil and hasCollectableGems(CONFIG.GemRadius)
 end
 
 -- เก็บเพชรก่อนเสมอ (ปิด Auto Swing ระหว่างเก็บ กันตีโดนไข่ระหว่างทาง)
@@ -1012,7 +1019,7 @@ end
 
 -- อยู่ในโซนนี้หรือใกล้พอจะ Tween ไปเองได้ไหม (ไม่ต้องวาร์ป)
 --   ใกล้ = โซนที่ตัวละครอยู่ใกล้ที่สุดคือโซนนี้ หรือห่างจากกลางโซนไม่เกิน CONFIG.NoWarpDist
-local function isNearZone(zoneName)
+isNearZone = function(zoneName)
 	local _, root = getChar()
 	if not root then return false end
 	local target = ZonePos[zoneName]
@@ -1032,7 +1039,7 @@ end
 ---------------------------------------------------------------------
 -- Callbacks
 ---------------------------------------------------------------------
-local finderResume -- จำสวิตช์หาตัวไว้จนฟาร์มกลับถึงโซน
+local finderResume -- จำสวิตช์หาตัวและเพชรไว้จนฟาร์มกลับถึงโซน
 local Callbacks = {}
 local motionLoops = {} -- รอเธรดฟาร์ม/เพชรหยุดจริงก่อนเริ่มส่งสัตว์
 
@@ -1149,8 +1156,11 @@ hasCollectableGems = function(radius)
 	return false
 end
 grabNearbyGems = function(shouldStop, radius)
+	local function stopped()
+		return not State.CollectGems or not canCollectGems() or (shouldStop and shouldStop())
+	end
 	local got = 0
-	while not (shouldStop and shouldStop()) do
+	while not stopped() do
 		local _, root = getChar()
 		if not root then break end
 		-- เพชรเม็ดที่ใกล้ที่สุด (ข้ามเม็ดที่เพิ่งเก็บไม่ติด)
@@ -1167,7 +1177,7 @@ grabNearbyGems = function(shouldStop, radius)
 		local part = gemPart(best)
 		if not gemLogged then gemLogged = true describeGem(best) end
 		if got == 0 then say("เก็บเพชร: ไปหาเพชรที่ตก") end
-		tweenTo(onGround(CFrame.new(part.Position)), shouldStop)
+		if not tweenTo(onGround(CFrame.new(part.Position)), stopped) or stopped() then break end
 		root.AssemblyLinearVelocity = Vector3.zero
 		if firetouchinterest and part.Parent then
 			firetouchinterest(root, part, 0)
@@ -1177,7 +1187,7 @@ grabNearbyGems = function(shouldStop, radius)
 		if prompt then triggerPrompt(prompt) end
 		-- ยืนบนเพชรจนเพชรหาย (ไม่เกิน GemStay วิ)
 		local t = os.clock()
-		while best.Parent and os.clock() - t < CONFIG.GemStay do
+		while best.Parent and os.clock() - t < CONFIG.GemStay and not stopped() do
 			if part.Parent then root.CFrame = onGround(CFrame.new(part.Position)) end
 			task.wait()
 		end
@@ -1201,7 +1211,7 @@ function Callbacks.CollectGems(on)
 	local run = State.GemRun
 	say("เปิดเก็บเพชรในโซนที่ฟาร์ม (ถ้าไม่ได้ฟาร์ม ใช้โซนที่ตัวละครอยู่)")
 	while State.CollectGems and State.GemRun == run do
-		if not State.AutoFarm then grabNearbyGems(function() return not State.CollectGems or State.AutoFarm end) end
+		if not State.AutoFarm and canCollectGems() then grabNearbyGems(function() return not State.CollectGems or State.AutoFarm end) end
 		task.wait(0.2)
 	end
 	motionLoops[thread] = nil
@@ -1747,7 +1757,7 @@ end)
 local gemToggle, farmToggle
 farmToggle = makeToggle(farmPage, "เริ่มฟาร์ม", false, function(on)
 	if on and (State.DeliveryBusy or State.Closed) then farmToggle.Set(false) return end
-	if gemToggle then gemToggle.Set(on) end
+	if gemToggle then gemToggle.Set(on and not finderResume) end
 	Callbacks.AutoFarm(on)
 end)
 gemToggle = makeToggle(farmPage, "เก็บเพชร", false, function(on)
@@ -2089,6 +2099,7 @@ local function deliverAnimal(animal, destination)
 	if State.DeliveryBusy or os.clock() - deliveryEndedAt < 2 then return end
 	State.DeliveryBusy = true
 	local farmWasOn = State.AutoFarm or farmToggle.Get()
+	local gemsWereOn = gemToggle.Get()
 	local findMoney, findBuff = moneyToggle.Get(), buffToggle.Get()
 	local finderPaused = false
 	local function pauseFinder()
@@ -2174,7 +2185,7 @@ local function deliverAnimal(animal, destination)
 	State.DeliveryBusy = false
 	if not ok then finderSay("ส่งสัตว์ไม่สำเร็จ " .. tostring(err)) end
 	if not State.Closed and destination == "กลับบ้าน" and (ok or farmWasOn) then
-		finderResume = { Money = findMoney, Buff = findBuff }
+		finderResume = { Money = findMoney, Buff = findBuff, Gems = gemsWereOn }
 		farmToggle.Set(true)
 	end
 end
@@ -2188,6 +2199,7 @@ task.spawn(function()
 			finderResume = nil
 			if resume.Money then moneyToggle.Set(true) end
 			if resume.Buff then buffToggle.Set(true) end
+			if resume.Gems then gemToggle.Set(true) end
 			say("ถึง " .. State.Zone .. " แล้ว เปิดหาตัวต่อ")
 		end
 		if (State.FindMoney or State.FindBuff) and not State.DeliveryBusy and inFarmZone then
