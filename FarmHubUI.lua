@@ -39,11 +39,25 @@ local CONFIG = {
 	ToolKeyword = "Pickaxe",       -- ชื่อที่ขุด (Elite Pickaxe ฯลฯ)
 	GuardTimeout = 30,             -- รอผู้พิทักษ์ตีนานสุดกี่วินาที
 	KnockbackDist = 12,            -- ถูกดันออกไกลเกินนี้ = โดนตีแล้ว
+	Home = CFrame.new(-70.7790527, 2.72415328, 3.12843513, 0.12112426, 0, -0.992637336, 0, 1, 0, 0.992637336, 0, 0.12112426),
+	AFK = CFrame.new(-748.049316, 37.7241478, 141.6633, 0.978355706, 0, 0.206930265, 0, 1, 0, -0.206930265, 0, 0.978355706),
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-14 r32"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-14 r33"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
+
+-- อ่านเงินทั้งค่าที่พิมพ์และข้อความเหนือหัวสัตว์ (แยกหน่วยยาวก่อน)
+local function parseMoney(str)
+	local cleaned = tostring(str):lower():gsub("/s", ""):gsub("[$,%s]", "")
+	local number, suffix = cleaned:match("^(%d*%.?%d+)(%a*)$")
+	local units = { qa = 1e15, qi = 1e18, sx = 1e21, sp = 1e24,
+		oc = 1e27, no = 1e30, dc = 1e33, k = 1e3, m = 1e6, b = 1e9, t = 1e12 }
+	local multiplier = suffix == "" and 1 or units[suffix]
+	if not number or not multiplier then return nil end
+	local value = tonumber(number) * multiplier
+	if value < math.huge then return value end
+end
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
 do
@@ -997,6 +1011,7 @@ end
 -- Callbacks
 ---------------------------------------------------------------------
 local Callbacks = {}
+local motionLoops = {} -- รอเธรดฟาร์ม/เพชรหยุดจริงก่อนเริ่มส่งสัตว์
 
 function Callbacks.ZoneChanged(zone)
 	log("เลือกโซน:", zone)
@@ -1013,7 +1028,15 @@ function Callbacks.AutoFarm(on)
 	State.FarmRun += 1
 	State.ReadyZone = nil
 	if not on then return end
+	local thread = coroutine.running()
+	motionLoops[thread] = true
 	local run = State.FarmRun
+	task.spawn(function()
+		while State.AutoFarm and State.FarmRun == run do
+			if not isCarrying() then getTool() end
+			task.wait(0.2)
+		end
+	end)
 	local function stopped() return not State.AutoFarm or State.FarmRun ~= run end
 	-- ตาย/เกิดใหม่ระหว่างฟาร์ม: เริ่มขั้นเตรียม + วาร์ปใหม่ ไม่ Tween ข้ามแมพจากจุดเกิด
 	local respawnConn = player.CharacterAdded:Connect(function()
@@ -1052,6 +1075,7 @@ function Callbacks.AutoFarm(on)
 		task.wait()
 	end
 	respawnConn:Disconnect()
+	motionLoops[thread] = nil
 end
 
 -- เก็บเพชร: เพชรที่ตกจากไข่อยู่ใน workspace.EggGemDrops (เช่น EggGemDrops.Gem)
@@ -1148,12 +1172,15 @@ function Callbacks.CollectGems(on)
 	State.CollectGems = on
 	State.GemRun += 1
 	if not on then return end
+	local thread = coroutine.running()
+	motionLoops[thread] = true
 	local run = State.GemRun
 	say("เปิดเก็บเพชรในโซนที่ฟาร์ม (ถ้าไม่ได้ฟาร์ม ใช้โซนที่ตัวละครอยู่)")
 	while State.CollectGems and State.GemRun == run do
 		if not State.AutoFarm then grabNearbyGems(function() return not State.CollectGems or State.AutoFarm end) end
 		task.wait(0.2)
 	end
+	motionLoops[thread] = nil
 end
 
 -- โหมดดีบัก: พิมพ์ข้อมูล Remote ที่เกี่ยวกับการตีไข่/เพชร ลงช่อง F9
@@ -1344,6 +1371,28 @@ local function setMinimized(min)
 	floatLogo.Visible = min
 end
 
+-- ทะลุสิ่งกีดขวางและกระโดดซ้ำได้ตลอดอายุหน้าต่าง
+local globalNoclip = RunService.Stepped:Connect(function()
+	local char = player.Character
+	if char then
+		for _, part in ipairs(char:GetDescendants()) do
+			if part:IsA("BasePart") then part.CanCollide = false end
+		end
+	end
+end)
+local infiniteJump = UIS.JumpRequest:Connect(function()
+	local _, _, hum = getChar()
+	if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+end)
+gui.Destroying:Connect(function()
+	State.Closed = true
+	State.FindMoney, State.FindBuff = false, false
+	State.AutoFarm = false
+	Callbacks.CollectGems(false)
+	globalNoclip:Disconnect()
+	infiniteJump:Disconnect()
+end)
+
 -- ปุ่มปิด
 local closeBtn = create("TextButton", {
 	AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 8),
@@ -1463,10 +1512,23 @@ local function makeButton(page, text, callback)
 end
 
 local function makeNote(page, text)
-	label(page, text, {
+	return label(page, text, {
 		Size = UDim2.new(1, 0, 0, 18), LayoutOrder = nextOrder(),
 		TextSize = 13, TextColor3 = C.SubText,
 	})
+end
+
+local function makeTextBox(page, text, default, callback)
+	local row = makeRow(page)
+	label(row, text, { Position = UDim2.fromOffset(12, 0), Size = UDim2.new(0.45, -12, 1, 0) })
+	local box = create("TextBox", {
+		Position = UDim2.new(0.45, 0, 0, 6), Size = UDim2.new(0.55, -8, 0, 28),
+		BackgroundColor3 = C.Input, Font = FONT, Text = default or "",
+		TextSize = 15, TextColor3 = C.Text, ClearTextOnFocus = false, Parent = row,
+	})
+	corner(box, 6)
+	box.FocusLost:Connect(function() if callback then callback(box.Text) end end)
+	return box
 end
 
 local function makeDropdown(page, text, options, default, callback)
@@ -1536,7 +1598,7 @@ local function makeDropdown(page, text, options, default, callback)
 end
 
 -- เลือกได้หลายตัว (selected = ตาราง { [ชื่อ] = true }) ไม่เลือกเลย = ทั้งหมด
-local function makeMultiSelect(page, text, options, selected, callback, clearText)
+local function makeMultiSelect(page, text, options, selected, callback, clearText, emptyText)
 	local ROW_H, ITEM_H, GAP = 40, 28, 4
 	local CLEAR = clearText or "ล้าง (ทั้งหมด)"
 	local row = makeRow(page, ROW_H)
@@ -1569,7 +1631,7 @@ local function makeMultiSelect(page, text, options, selected, callback, clearTex
 		local names = {}
 		for _, o in ipairs(opts) do if selected[o] then table.insert(names, o) end end
 		for o in pairs(selected) do if not table.find(names, o) then table.insert(names, o) end end
-		valueLabel.Text = #names == 0 and "ทั้งหมด" or table.concat(names, ", ")
+		valueLabel.Text = #names == 0 and (emptyText or "ทั้งหมด") or table.concat(names, ", ")
 		for o, item in pairs(items) do
 			local on = selected[o] == true
 			item.BackgroundColor3 = on and C.Accent or C.Input
@@ -1634,6 +1696,7 @@ end
 -- 1) ฟาร์ม
 local farmPage = addTab("ฟาร์ม")
 local eggPicker, lastEggList
+local refreshAnimalList -- สร้างหลังตัวเลือกสัตว์ แล้วเรียกเมื่อเปลี่ยนโซน
 
 -- อัปเดตรายชื่อไข่ของโซนที่เลือก (เรียกตอนเปลี่ยนโซน และวนเช็กเองทุก 1.5 วิ)
 local function refreshEggList()
@@ -1651,16 +1714,21 @@ makeDropdown(farmPage, "เลือกโซน", CONFIG.ZoneOrder, State.Zone,
 	for k in pairs(State.Eggs) do State.Eggs[k] = nil end   -- ไข่ของโซนเก่าใช้ไม่ได้แล้ว
 	lastEggList = nil
 	refreshEggList()
+	if refreshAnimalList then refreshAnimalList() end
 	Callbacks.ZoneChanged(zone)
 end)
 
 -- เปิด/ปิดเริ่มฟาร์ม = เปิด/ปิดเก็บเพชรด้วย (ปิดเก็บเพชรแยกได้ ฟาร์มยังทำงานต่อ)
-local gemToggle
-makeToggle(farmPage, "เริ่มฟาร์ม", false, function(on)
+local gemToggle, farmToggle
+farmToggle = makeToggle(farmPage, "เริ่มฟาร์ม", false, function(on)
+	if on and (State.DeliveryBusy or State.Closed) then farmToggle.Set(false) return end
 	if gemToggle then gemToggle.Set(on) end
 	Callbacks.AutoFarm(on)
 end)
-gemToggle = makeToggle(farmPage, "เก็บเพชร", false, Callbacks.CollectGems)
+gemToggle = makeToggle(farmPage, "เก็บเพชร", false, function(on)
+	if on and (State.DeliveryBusy or State.Closed) then gemToggle.Set(false) return end
+	Callbacks.CollectGems(on)
+end)
 
 eggPicker = makeMultiSelect(farmPage, "เลือกไข่", {}, State.Eggs, function()
 	say("เลือกไข่:", next(State.Eggs) and "ตั้งแล้ว" or "ทุกชนิด")
@@ -1685,8 +1753,288 @@ makeToggle(farmPage, "โหมดดีบัก (ดูผลใน F9)", fals
 
 -- 2) หาตัว
 local findPage = addTab("หาตัว")
-makeToggle(findPage, "ตัวอย่าง: ออโต้หาตัว", false, function(on)
-	print("[FarmHub] หาตัว:", on) -- TODO
+local Finder = { Minimum = 1e6, Secondary = {}, Animals = {}, Buffs = {},
+	MoneyDestination = "กลับบ้าน", BuffDestination = "กลับบ้าน" }
+local ANIMAL_FILE = "FarmHub_animals.json"
+local animalNames, animalsDirty, animalSaveAt = {}, false, 0
+pcall(function()
+	if isfile and isfile(ANIMAL_FILE) then
+		local saved = HttpService:JSONDecode(readfile(ANIMAL_FILE))
+		for zone, names in pairs(saved) do
+			if type(zone) == "string" and type(names) == "table" then
+				animalNames[zone] = {}
+				for _, name in ipairs(names) do
+					if type(name) == "string" then animalNames[zone][name] = true end
+				end
+			end
+		end
+	end
+end)
+
+local function selectedZoneId()
+	local n = State.Zone:match("(%d+)$")
+	return n and "Zone" .. n
+end
+
+makeNote(findPage, "หาตามเงินต่อวินาที")
+local minimumNote
+makeTextBox(findPage, "เงินขั้นต่ำ/วิ", "1m", function(text)
+	Finder.Minimum = parseMoney(text)
+	minimumNote.Text = Finder.Minimum and ("ขั้นต่ำ " .. string.format("%.6g", Finder.Minimum) .. " ต่อวินาที")
+		or "กรุณาใส่เงินให้ถูกต้อง เช่น 1m, 30B, 1.5qa"
+end)
+minimumNote = makeNote(findPage, "ขั้นต่ำ 1000000 ต่อวินาที")
+local secondaryPicker = makeMultiSelect(findPage, "ตัวอันดับ 2", {}, Finder.Secondary, nil, "ล้าง (ไม่เลือก)", "ไม่เลือก")
+makeDropdown(findPage, "พาไปที่", { "กลับบ้าน", "จุด AFK" }, Finder.MoneyDestination, function(v)
+	Finder.MoneyDestination = v
+end)
+local moneyToggle = makeToggle(findPage, "เปิดหาตัว (กลุ่ม 1)", false, function(on) State.FindMoney = on end)
+makeNote(findPage, "หาตัวติดบัพ")
+makeDropdown(findPage, "พาไปที่", { "กลับบ้าน", "จุด AFK" }, Finder.BuffDestination, function(v)
+	Finder.BuffDestination = v
+end)
+local buffToggle = makeToggle(findPage, "เปิดหาตัวติดบัพ (กลุ่ม 2)", false, function(on) State.FindBuff = on end)
+local animalPicker = makeMultiSelect(findPage, "ตัว", {}, Finder.Animals)
+makeMultiSelect(findPage, "บัพ", { "Hacker", "Time", "Haeven", "Thunder", "Void", "ice", "Gold", "Diamond" },
+	Finder.Buffs, nil, "ล้าง (ไม่เลือก)", "ไม่เลือก")
+makeNote(findPage, "* กลุ่ม 2 ต้องเลือกบัพอย่างน้อยหนึ่งชนิด")
+local finderStatus = makeNote(findPage, "สถานะหาตัว รอเปิดใช้งาน")
+local lastAnimalList, lastAnimalZone
+refreshAnimalList = function()
+	local folder = workspace:FindFirstChild("AnimalPickups")
+	if folder then
+		for _, animal in ipairs(folder:GetChildren()) do
+			local zone, name = animal:GetAttribute("ZoneId"), animal:GetAttribute("AnimalName")
+			if type(zone) == "string" and type(name) == "string" and name ~= "" then
+				animalNames[zone] = animalNames[zone] or {}
+				if not animalNames[zone][name] then
+					animalNames[zone][name], animalsDirty = true, true
+				end
+			end
+		end
+	end
+	local zone, list = selectedZoneId(), {}
+	for name in pairs(animalNames[zone] or {}) do table.insert(list, name) end
+	table.sort(list)
+	local key = table.concat(list, "|")
+	if zone ~= lastAnimalZone then
+		table.clear(Finder.Secondary)
+		table.clear(Finder.Animals)
+	end
+	if key ~= lastAnimalList or zone ~= lastAnimalZone then
+		lastAnimalList, lastAnimalZone = key, zone
+		secondaryPicker.SetOptions(list)
+		animalPicker.SetOptions(list)
+	end
+	if animalsDirty and writefile and os.clock() >= animalSaveAt then
+		local data = {}
+		for id, names in pairs(animalNames) do
+			data[id] = {}
+			for name in pairs(names) do table.insert(data[id], name) end
+			table.sort(data[id])
+		end
+		local ok = pcall(function() writefile(ANIMAL_FILE, HttpService:JSONEncode(data)) end)
+		if ok then animalsDirty = false end
+		animalSaveAt = os.clock() + 5
+	end
+end
+refreshAnimalList()
+task.spawn(function()
+	while gui.Parent do refreshAnimalList() task.wait(1.5) end
+end)
+
+local function finderSay(text)
+	pcall(function() finderStatus.Text = "สถานะหาตัว " .. text end)   -- กัน GUI error หยุดงาน
+	say(text)
+end
+
+-- ยืนยันตัวเดิมจากอ้างอิงโมเดล และจับคู่จุดกดที่อยู่ใกล้รากที่สุด
+local function animalPresent(animal)
+	local folder = workspace:FindFirstChild("AnimalPickups")
+	return folder and animal.Parent == folder
+end
+local function animalPrompt(animal)
+	if not animalPresent(animal) then return end
+	local root = animal:FindFirstChild("RootPart")
+	if not root or not root:IsA("BasePart") then return end
+	local best, bestDistance = nil, 15
+	for _, anchor in ipairs(workspace:GetChildren()) do
+		if anchor.Name == "PromptAnchor" and anchor:IsA("BasePart") then
+			local prompt = anchor:FindFirstChild("StealPrompt")
+			local distance = (anchor.Position - root.Position).Magnitude
+			if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled and distance <= bestDistance then
+				best, bestDistance = prompt, distance
+			end
+		end
+	end
+	return best
+end
+local function animalDetails(animal)
+	local root = animal:FindFirstChild("RootPart")
+	local attachment = root and root:FindFirstChild("AnimalOverheadAttachment")
+	local overhead = attachment and attachment:FindFirstChild("AnimalOverhead")
+	local cash = overhead and overhead:FindFirstChild("CashPerSecond")
+	cash = cash and cash:FindFirstChild("CashPerSecond")
+	local cps = cash and cash:IsA("TextLabel") and parseMoney(cash.Text) or 0
+	local mutation = overhead and overhead:FindFirstChild("Mutation")
+	local buffs = {}
+	local function add(value)
+		if type(value) == "string" and value ~= "" then buffs[value:lower():match("^%s*(.-)%s*$")] = true end
+	end
+	if mutation and mutation:IsA("TextLabel") then add(mutation.Text) end
+	add(animal:GetAttribute("AuraMutation"))
+	add(animal:GetAttribute("Mutation"))
+	return cps or 0, buffs
+end
+local function chooseAnimal()
+	local folder = workspace:FindFirstChild("AnimalPickups")
+	if not folder then return end
+	local candidates, anyAFK = {}, false
+	for _, animal in ipairs(folder:GetChildren()) do
+		local despawn = animal:GetAttribute("DespawnAtServerTime")
+		if animal:IsA("Model") and animal:GetAttribute("ZoneId") == selectedZoneId()
+			and type(despawn) == "number" and despawn - workspace:GetServerTimeNow() > 6 then
+			local cps, buffs = animalDetails(animal)
+			local name = animal:GetAttribute("AnimalName")
+			local rank
+			if State.FindMoney then
+				if Finder.Minimum and cps >= Finder.Minimum then rank = 1
+				elseif Finder.Secondary[name] then rank = 2 end
+			end
+			local buffMatch = false
+			if State.FindBuff and (next(Finder.Animals) == nil or Finder.Animals[name]) then
+				for buff in pairs(Finder.Buffs) do
+					if buffs[buff:lower()] then buffMatch = true break end
+				end
+			end
+			if rank or buffMatch then
+				local afk = (rank and Finder.MoneyDestination == "จุด AFK")
+					or (buffMatch and Finder.BuffDestination == "จุด AFK")
+				anyAFK = anyAFK or afk
+				table.insert(candidates, { Animal = animal, Cps = cps, Rank = rank or 3 })
+			end
+		end
+	end
+	local best
+	for _, candidate in ipairs(candidates) do
+		if not best or (anyAFK and candidate.Cps > best.Cps)
+			or (not anyAFK and (candidate.Rank < best.Rank
+				or (candidate.Rank == best.Rank and candidate.Cps > best.Cps))) then best = candidate end
+	end
+	return best, anyAFK and "จุด AFK" or "กลับบ้าน"
+end
+
+local function stealSameAnimal(animal, timeout, immediate, shouldStop)
+	-- เวลาเดินทางรอบแรกแยกจากเวลารอกดเก็บ ส่วนรอบล้มต้องเก็บทันที
+	if not immediate then
+		local prompt = animalPrompt(animal)
+		local _, root = getChar()
+		if not prompt or not root then return false end
+		if not tweenTo(onGround(besideCFrame(promptPos(prompt), root, 2), animal), shouldStop) then return false end
+	end
+	local started = os.clock()
+	local function timedOut() return shouldStop() or os.clock() - started >= timeout end
+	while not timedOut() do
+		if not animalPresent(animal) then return false end
+		local _, root = getChar()
+		if not root then return false end
+		local prompt = animalPrompt(animal)
+		if prompt then
+			local cf = besideCFrame(promptPos(prompt), root, 2)
+			if immediate then root.CFrame = cf
+			elseif (root.Position - cf.Position).Magnitude > 4 then
+				if not tweenTo(onGround(cf, animal), timedOut) then return false end
+			end
+			if timedOut() then return false end
+			-- จุดกดอาจย้ายระหว่างเดินทาง จึงตรวจจับคู่ใหม่ก่อนกด
+			prompt = animalPrompt(animal)
+			if prompt then triggerPrompt(prompt) end
+		end
+		if isCarrying() then return true end
+		task.wait(0.05)
+	end
+	return false
+end
+
+local function deliverAnimal(candidate, destination)
+	if State.DeliveryBusy then return end
+	State.DeliveryBusy = true
+	local farmWasOn = State.AutoFarm or farmToggle.Get()
+	local zone, character = State.Zone, player.Character
+	local function shouldStop()
+		return State.Closed or State.Zone ~= zone or player.Character ~= character
+			or not getChar() or not (State.FindMoney or State.FindBuff)
+	end
+	local ok, err = pcall(function()
+		finderSay("กำลังไปรับ " .. tostring(candidate.Animal:GetAttribute("AnimalName")))
+		farmToggle.Set(false)
+		gemToggle.Set(false)
+		-- Set เรียก callback ในเธรดใหม่ รอทั้งสถานะและเธรดเคลื่อนที่ให้จบ
+		repeat
+			task.wait()
+			for thread in pairs(motionLoops) do
+				if coroutine.status(thread) == "dead" then motionLoops[thread] = nil end
+			end
+			if shouldStop() then error("ยกเลิกการส่งสัตว์") end
+		until not State.AutoFarm and not State.CollectGems and next(motionLoops) == nil
+		if isCarrying() then error("กำลังถือสัตว์ตัวอื่นอยู่") end
+		local _, _, hum = getChar()
+		hum:UnequipTools()
+		if not stealSameAnimal(candidate.Animal, 5, false, shouldStop) then error("ยกสัตว์ไม่สำเร็จ") end
+		local guard = getGuard(zone)
+		if not guard then error("ไม่พบผู้พิทักษ์ของโซน") end
+		finderSay("รอผู้พิทักษ์ตีให้สัตว์ตก")
+		if not waitForGuardHit(guard, shouldStop) or shouldStop() or isCarrying() then
+			error("ผู้พิทักษ์ยังไม่ทำให้สัตว์ตก")
+		end
+		-- เก็บตัวเดิมทันทีตอนยังล้ม ห้ามรอให้ลุกก่อนวาร์ป
+		if not stealSameAnimal(candidate.Animal, 3, true, shouldStop) then error("ยกสัตว์ตัวเดิมซ้ำไม่สำเร็จ") end
+		local target = destination == "จุด AFK" and CONFIG.AFK or CONFIG.Home
+		local arrived = false
+		for _ = 1, 3 do
+			if shouldStop() then error("ยกเลิกการส่งสัตว์") end
+			local _, root = getChar()
+			root.CFrame = target
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+			task.wait(0.4)
+			local _, currentRoot = getChar()
+			if currentRoot and (currentRoot.Position - target.Position).Magnitude <= 40 then arrived = true break end
+		end
+		if not arrived then error("ถูกดึงกลับหลังวาร์ปครบสามครั้ง") end
+		if shouldStop() then error("ยกเลิกการส่งสัตว์") end
+		if destination == "จุด AFK" then
+			State.FindMoney, State.FindBuff = false, false
+			moneyToggle.Set(false)
+			buffToggle.Set(false)
+			farmToggle.Set(false)
+			gemToggle.Set(false)
+			finderSay("ถึงจุด AFK แล้ว ปิดทุกระบบ")
+		else
+			local started = os.clock()
+			while isCarrying() and os.clock() - started < 3 and not shouldStop() do task.wait(0.05) end
+			if shouldStop() then error("ยกเลิกการส่งสัตว์") end
+			if isCarrying() then error("กลับบ้านแล้วแต่ยังฝากสัตว์ไม่สำเร็จ") end
+			finderSay("ฝากสัตว์แล้ว เริ่มฟาร์มต่อ")
+		end
+	end)
+	State.DeliveryBusy = false
+	if not ok then finderSay("ส่งสัตว์ไม่สำเร็จ " .. tostring(err)) end
+	if not State.Closed and destination == "กลับบ้าน" and (ok or farmWasOn) then farmToggle.Set(true) end
+end
+
+task.spawn(function()
+	while gui.Parent do
+		if (State.FindMoney or State.FindBuff) and not State.DeliveryBusy then
+			local ok, err = pcall(function()
+				local candidate, destination = chooseAnimal()
+				if candidate then deliverAnimal(candidate, destination)
+				else pcall(function() finderStatus.Text = "สถานะหาตัว รอสัตว์ที่ตรงเงื่อนไข" end) end
+			end)
+			if not ok then finderSay("ตรวจหาสัตว์ไม่สำเร็จ " .. tostring(err)) end
+		end
+		task.wait(0.5)
+	end
 end)
 
 -- 3) สวน
