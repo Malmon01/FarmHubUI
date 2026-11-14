@@ -42,7 +42,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-14 r31"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-14 r32"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -217,6 +217,23 @@ end
 
 -- คุม Auto Swing ผ่านโค้ดของเกม (PlayerScripts.Client.Controllers.AutoSwingController) แทนการกดปุ่ม
 -- พิมพ์รายชื่อฟังก์ชันลง log ครั้งแรก (ไว้ดูว่าใช้ตัวไหนได้)
+-- คืนสิทธิ์เธรดของเราหลังเรียกโค้ดเกม ถ้า executor รองรับ
+local function restoreThreadIdentity()
+	local setIdentity = setthreadidentity or set_thread_identity or setidentity
+	if type(setIdentity) == "function" then
+		pcall(setIdentity, 8)
+	end
+end
+
+-- แยกโค้ดเกมไปเธรดใหม่ เพื่อไม่ให้สิทธิ์ของเธรดฟาร์มลดลง
+local function runIsolated(fn, ...)
+	local ok, result = coroutine.wrap(function(...)
+		return pcall(fn, ...)
+	end)(...)
+	restoreThreadIdentity()
+	return ok, result
+end
+
 local swingCtrl, swingCtrlTried = nil, false
 local function getSwingController()
 	if swingCtrlTried then return swingCtrl end
@@ -226,7 +243,7 @@ local function getSwingController()
 	local ctrls = client and client:FindFirstChild("Controllers")
 	local mod = ctrls and ctrls:FindFirstChild("AutoSwingController")
 	if not mod then print("[FarmHub] ไม่พบ AutoSwingController") return nil end
-	local ok, res = pcall(require, mod)
+	local ok, res = runIsolated(require, mod)
 	if not ok or type(res) ~= "table" then
 		print("[FarmHub] require AutoSwingController ไม่ได้:", res)
 		return nil
@@ -242,9 +259,9 @@ end
 local function controllerIsOn()
 	local c = getSwingController()
 	if not c or type(c.IsOn) ~= "function" then return nil end
-	local ok, v = pcall(c.IsOn)
+	local ok, v = runIsolated(c.IsOn)
 	if ok and type(v) == "boolean" then return v end
-	ok, v = pcall(c.IsOn, c)
+	ok, v = runIsolated(c.IsOn, c)
 	if ok and type(v) == "boolean" then return v end
 	return nil
 end
@@ -252,9 +269,9 @@ end
 local function controllerSetSwing(on)
 	local c = getSwingController()
 	if not c or type(c.SetOn) ~= "function" then return false end
-	pcall(c.SetOn, on)
+	runIsolated(c.SetOn, on)
 	if controllerIsOn() == on then return true end
-	pcall(c.SetOn, c, on)
+	runIsolated(c.SetOn, c, on)
 	return controllerIsOn() == on
 end
 
@@ -746,7 +763,10 @@ local function say(...)
 	if statusLabel then
 		local parts = {}
 		for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
-		statusLabel.Text = "สถานะ: " .. table.concat(parts, " ")
+		-- ป้องกันข้อผิดพลาดจาก GUI ไม่ให้หยุดลูปฟาร์ม
+		pcall(function()
+			statusLabel.Text = "สถานะ: " .. table.concat(parts, " ")
+		end)
 	end
 end
 
