@@ -44,7 +44,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-14 r39"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-14 r40"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- อ่านเงินทั้งค่าที่พิมพ์และข้อความเหนือหัวสัตว์ (แยกหน่วยยาวก่อน)
@@ -106,6 +106,7 @@ local State = {
 	Eggs        = {},              -- ชนิดไข่ที่เลือก (ว่าง = ทุกชนิด)
 	AutoFarm    = false,
 	CollectGems = false,
+	AfkPinned   = false,           -- ตรึงตัวที่จุด AFK จนกว่าจะเปิดระบบอีกครั้ง
 	Debug       = false,
 	FarmRun     = 0,
 	ReadyZone   = nil,
@@ -626,20 +627,62 @@ local function eggCFrame(egg, root)
 	return onGround(cf, eggsFolder)
 end
 
+-- ตรึงเฉพาะตัวละครที่ส่งถึง AFK และคืนการเคลื่อนที่เมื่อเลิกตรึง
+local afkPinRoot, afkPinConnections = nil, {}
+local function releaseAfkPin()
+	State.AfkPinned = false
+	for _, conn in ipairs(afkPinConnections) do conn:Disconnect() end
+	table.clear(afkPinConnections)
+	if afkPinRoot and afkPinRoot.Parent then afkPinRoot.Anchored = false end
+	afkPinRoot = nil
+end
+
+local function pinAtAfk()
+	local char, root, hum = getChar()
+	if not root or State.Closed then return false end
+	releaseAfkPin()
+	-- คงพิกัดและทิศทาง AFK ปรับเฉพาะความสูงตามพื้น โดยไม่นับสัตว์ที่ถือ
+	local cf = onGround(CONFIG.AFK, workspace:FindFirstChild("CarriedAnimals"))
+	afkPinRoot = root
+	State.AfkPinned = true
+	root.CFrame = cf
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	root.Anchored = true
+	table.insert(afkPinConnections, hum.Died:Connect(releaseAfkPin))
+	table.insert(afkPinConnections, player.CharacterRemoving:Connect(releaseAfkPin))
+	table.insert(afkPinConnections, player.CharacterAdded:Connect(releaseAfkPin))
+	table.insert(afkPinConnections, RunService.Heartbeat:Connect(function()
+		if player.Character ~= char or not root.Parent or hum.Health <= 0 then
+			releaseAfkPin()
+			return
+		end
+		-- กันแรงหรือสคริปต์อื่นย้ายตัว โดยยังถือสัตว์ไว้ตามเดิม
+		root.Anchored = true
+		if root.CFrame ~= cf then root.CFrame = cf end
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+	end))
+	return true
+end
+
 -- เคลื่อนที่แบบ Tween ด้วยความเร็ว CONFIG.TweenSpeed (studs/วินาที)
 local tweenMoving = false -- งดแก้การจมระหว่างเคลื่อนที่ด้วย Tween
 local function tweenTo(cf, shouldStop)
+	if State.AfkPinned then return false end
 	local _, root = getChar()
 	if not root then return false end
 	local t = (root.Position - cf.Position).Magnitude / CONFIG.TweenSpeed
 	if t < 0.05 then root.CFrame = cf return true end
 	local hold = RunService.Heartbeat:Connect(function()
+		if State.AfkPinned then return end
 		root.AssemblyLinearVelocity = Vector3.zero
 		root.AssemblyAngularVelocity = Vector3.zero
 	end)
 	-- Noclip ระหว่าง Tween: ทะลุกำแพง/สิ่งกีดขวาง
 	local char = root.Parent
 	local noclip = RunService.Stepped:Connect(function()
+		if State.AfkPinned then return end
 		for _, p in ipairs(char:GetDescendants()) do
 			if p:IsA("BasePart") then p.CanCollide = false end
 		end
@@ -649,7 +692,7 @@ local function tweenTo(cf, shouldStop)
 	local c = tween.Completed:Connect(function() done = true end)
 	tweenMoving = true
 	tween:Play()
-	while not done and not (shouldStop and shouldStop()) and root.Parent do task.wait() end
+	while not done and not State.AfkPinned and not (shouldStop and shouldStop()) and root.Parent do task.wait() end
 	if not done then tween:Cancel() end
 	tweenMoving = false
 	c:Disconnect()
@@ -664,7 +707,7 @@ local isNearZone         -- กำหนดในส่วนตรวจโซ�
 
 -- ระหว่างฟาร์ม เก็บเพชรได้เมื่อถึงโซนที่เลือกแล้วเท่านั้น
 local function canCollectGems()
-	return not State.DeliveryBusy and not State.Closed
+	return not State.AfkPinned and not State.DeliveryBusy and not State.Closed
 		and (not State.AutoFarm or (State.ReadyZone == State.Zone and isNearZone(State.Zone)))
 end
 
@@ -724,7 +767,7 @@ local function breakEgg(egg, shouldStop, skipGems)
 	local spot = eggCFrame(egg, root)   -- จุดยืน (บนพื้น)
 	setSwing(true)     -- ถึงไข่เป้าหมาย: เปิด
 	local started, lastHit, lastGemCheck = os.clock(), 0, 0
-	while eggAlive(egg) and not shouldStop() and os.clock() - started < CONFIG.EggTimeout do
+	while eggAlive(egg) and not State.AfkPinned and not shouldStop() and os.clock() - started < CONFIG.EggTimeout do
 		-- มีเพชรดรอป: หยุดตี ไปเก็บเพชรก่อน แล้วกลับมาตีต่อ
 		if not skipGems and os.clock() - lastGemCheck > 0.15 then
 			lastGemCheck = os.clock()
@@ -834,7 +877,7 @@ end
 local function liftAnimal(eggPos, newPrompts, shouldStop)
 	local started, tried = os.clock(), 0
 	local slowScanAt = os.clock() + 1.5   -- ถ้า 1.5 วิยังไม่เจอ ค่อยสแกนทั้งแมพ (ช้า)
-	while os.clock() - started < CONFIG.LiftWait and not shouldStop() do
+	while os.clock() - started < CONFIG.LiftWait and not State.AfkPinned and not shouldStop() do
 		local best = bestLiftPrompt(newPrompts, eggPos)
 		if not best then
 			local pickups = workspace:FindFirstChild("AnimalPickups")
@@ -907,7 +950,7 @@ local function waitForGuardHit(guard, shouldStop)
 		log("ผู้พิทักษ์ ChaseState =", guard:GetAttribute("ChaseState"))
 	end))
 
-	local stop = function() return hit or shouldStop() end
+	local stop = function() return State.AfkPinned or hit or shouldStop() end
 	tweenTo(onGround(besideCFrame(guard:GetPivot().Position, root, 3), guard), stop)
 
 	local started = os.clock()
@@ -990,7 +1033,7 @@ local function holdAfterTeleport(cf, duration)
 	local started = os.clock()
 	while os.clock() - started < (duration or 1.2) do
 		RunService.Heartbeat:Wait()
-		if player.Character ~= char or not char.Parent or not root.Parent then return end
+		if State.AfkPinned or player.Character ~= char or not char.Parent or not root.Parent then return end
 		local pos = root.Position
 		local drift = Vector3.new(pos.X - cf.Position.X, 0, pos.Z - cf.Position.Z)
 		if drift.Magnitude > 1 then
@@ -1004,6 +1047,7 @@ end
 -- วาร์ปทันทีไปโซน (ถ้าเกมดึงตัวกลับ จะวาร์ปซ้ำ สูงสุด CONFIG.TeleportRetries ครั้ง)
 local function teleportInto(zoneName)
 	for attempt = 1, CONFIG.TeleportRetries do
+		if State.AfkPinned then return false end
 		local _, root = getChar()
 		if not root then return false end
 		local target = zoneTarget(zoneName, root)
@@ -1089,7 +1133,7 @@ function Callbacks.AutoFarm(on)
 			task.wait(0.2)
 		end
 	end)
-	local function stopped() return not State.AutoFarm or State.FarmRun ~= run end
+	local function stopped() return State.AfkPinned or not State.AutoFarm or State.FarmRun ~= run end
 	-- ตาย/เกิดใหม่ระหว่างฟาร์ม: เริ่มขั้นเตรียม + วาร์ปใหม่ ไม่ Tween ข้ามแมพจากจุดเกิด
 	local respawnConn = player.CharacterAdded:Connect(function()
 		if not stopped() then say("ตัวละครเกิดใหม่ เริ่มรอบใหม่") State.ReadyZone = nil end
@@ -1429,6 +1473,7 @@ end
 
 -- ทะลุสิ่งกีดขวางและกระโดดซ้ำได้ตลอดอายุหน้าต่าง
 local globalNoclip = RunService.Stepped:Connect(function()
+	if State.AfkPinned then return end
 	local char = player.Character
 	if char then
 		for _, part in ipairs(char:GetDescendants()) do
@@ -1438,6 +1483,7 @@ local globalNoclip = RunService.Stepped:Connect(function()
 end)
 -- ยกตัวละครที่จมให้ยืนบนพื้นจริง โดยคงทิศทางและความเร็วแนวราบไว้
 local antiSink = RunService.Heartbeat:Connect(function()
+	if State.AfkPinned then return end
 	local char, root, hum = getChar()
 	if not root or tweenMoving or hum:GetState() == Enum.HumanoidStateType.Seated then return end
 	-- หยุดไถลเมื่อไม่มีอินพุต แต่คงความเร็วแนวดิ่งและการกระโดดไว้
@@ -1465,11 +1511,13 @@ local antiSink = RunService.Heartbeat:Connect(function()
 	end
 end)
 local infiniteJump = UIS.JumpRequest:Connect(function()
+	if State.AfkPinned then return end
 	local _, _, hum = getChar()
 	if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
 end)
 gui.Destroying:Connect(function()
 	State.Closed = true
+	releaseAfkPin()
 	finderResume = nil
 	State.FindMoney, State.FindBuff = false, false
 	State.AutoFarm = false
@@ -1807,11 +1855,13 @@ end)
 -- เปิด/ปิดเริ่มฟาร์ม = เปิด/ปิดเก็บเพชรด้วย (ปิดเก็บเพชรแยกได้ ฟาร์มยังทำงานต่อ)
 local gemToggle, farmToggle
 farmToggle = makeToggle(farmPage, "เริ่มฟาร์ม", false, function(on)
+	if on then releaseAfkPin() end
 	if on and (State.DeliveryBusy or State.Closed) then farmToggle.Set(false) return end
 	if gemToggle then gemToggle.Set(on and not finderResume) end
 	Callbacks.AutoFarm(on)
 end)
 gemToggle = makeToggle(farmPage, "เก็บเพชร", false, function(on)
+	if on then releaseAfkPin() end
 	if on and (State.DeliveryBusy or State.Closed) then gemToggle.Set(false) return end
 	Callbacks.CollectGems(on)
 end)
@@ -1876,6 +1926,7 @@ makeDropdown(findPage, "พาไปที่", { "กลับบ้าน", "�
 end)
 local moneyToggle, buffToggle
 moneyToggle = makeToggle(findPage, "เปิดหาตัว (กลุ่ม 1)", false, function(on)
+	if on then releaseAfkPin() end
 	if on and (State.DeliveryBusy or State.Closed) then moneyToggle.Set(false) return end
 	State.FindMoney = on
 end)
@@ -1884,6 +1935,7 @@ makeDropdown(findPage, "พาไปที่", { "กลับบ้าน", "�
 	Finder.BuffDestination = v
 end)
 buffToggle = makeToggle(findPage, "เปิดหาตัวติดบัพ (กลุ่ม 2)", false, function(on)
+	if on then releaseAfkPin() end
 	if on and (State.DeliveryBusy or State.Closed) then buffToggle.Set(false) return end
 	State.FindBuff = on
 end)
@@ -2075,7 +2127,7 @@ local function stealSameAnimal(animal, timeout, immediate, shouldStop, reselect)
 	local started, destination = os.clock(), nil
 	local lastPress, wrongSince = -math.huge, nil
 	local appeared = false
-	local function timedOut() return shouldStop() or os.clock() - started >= timeout end
+	local function timedOut() return State.AfkPinned or shouldStop() or os.clock() - started >= timeout end
 	while not timedOut() do
 		local carried = carriedAnimal()
 		if isCarrying() then
@@ -2167,7 +2219,7 @@ local function deliverAnimal(animal, destination)
 	end
 	local zone, character = State.Zone, player.Character
 	local function shouldStop()
-		return State.Closed or State.Zone ~= zone or player.Character ~= character
+		return State.AfkPinned or State.Closed or State.Zone ~= zone or player.Character ~= character
 			or not getChar() or (not finderPaused and not (State.FindMoney or State.FindBuff))
 	end
 	local ok, err = pcall(function()
@@ -2224,6 +2276,7 @@ local function deliverAnimal(animal, destination)
 			buffToggle.Set(false)
 			farmToggle.Set(false)
 			gemToggle.Set(false)
+			if not pinAtAfk() then error("ไม่สามารถตรึงตัวที่จุด AFK") end
 			finderSay("ถึงจุด AFK แล้ว ปิดทุกระบบ")
 		else
 			local started = os.clock()
