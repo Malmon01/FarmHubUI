@@ -26,7 +26,7 @@ local CONFIG = {
 	ToggleKey  = Enum.KeyCode.RightControl,
 	HitInterval = 0.2,             -- ตีไข่ (ส่ง EggHitRequest) ทุกกี่วินาที (ถ้าโดนปฏิเสธจะช้าลงเอง)
 	EggTimeout = 20,               -- ตีไข่ใบเดียวนานสุดกี่วินาที แล้วข้ามไปใบอื่น
-	GemRadius  = 60,               -- เก็บเพชรเฉพาะที่อยู่ใกล้ตัวในรัศมีนี้ (studs)
+	GemRadius  = 60,               -- รัศมีเก็บเพชรสำรองเมื่อยังไม่มีข้อมูลตำแหน่งโซน (studs)
 	GemStay    = 0.25,             -- ยืนบนเพชรรอให้เก็บติดนานสุดกี่วินาที
 	TeleportRetries = 3,           -- วาร์ปซ้ำกี่ครั้งถ้าเกมดึงตัวกลับ
 	NoWarpDist = 300,              -- ห่างจากกลางโซนที่เลือกไม่เกินนี้ = ไม่ต้องวาร์ป Tween ไปเลย
@@ -42,7 +42,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-10 r30"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-14 r31"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- ดึงรายชื่อโซนจริงจาก workspace.Build.ZoneBuilds (Zone1, Zone2, ...)
@@ -461,6 +461,25 @@ local function rememberZone(zoneName, pos)
 	end
 end
 
+-- หาโซนที่มีจุดกึ่งกลางใกล้ตำแหน่งนี้ที่สุด
+local function zoneOfPosition(pos)
+	local closestZone, closestDist
+	for name, center in pairs(ZonePos) do
+		local distance = (center - pos).Magnitude
+		if not closestDist or distance < closestDist then
+			closestZone, closestDist = name, distance
+		end
+	end
+	return closestZone
+end
+
+-- ตอนฟาร์มใช้โซนที่เลือก นอกนั้นใช้โซนที่ตัวละครอยู่
+local function gemZoneTarget()
+	if State.AutoFarm then return State.Zone end
+	local _, root = getChar()
+	return root and zoneOfPosition(root.Position)
+end
+
 -- หาไข่ในโซน
 --   filter   = ชื่อชนิดไข่ หรือ ALL_EGGS
 --   usePrefs = true: ใช้ชนิดไข่ที่เลือก + ลำดับการตีที่ตั้งไว้ (ใช้ตอนฟาร์ม)
@@ -619,7 +638,7 @@ local function sendHit(eggPart)
 end
 
 -- Tween ไปข้างไข่ แล้วตีจนแตก
--- มีเพชรตกอยู่ใกล้ ๆ ไหม
+-- มีเพชรตกอยู่ในโซนเป้าหมายไหม
 local function gemsAround()
 	return hasCollectableGems ~= nil and hasCollectableGems(CONFIG.GemRadius)
 end
@@ -1016,7 +1035,7 @@ function Callbacks.AutoFarm(on)
 end
 
 -- เก็บเพชร: เพชรที่ตกจากไข่อยู่ใน workspace.EggGemDrops (เช่น EggGemDrops.Gem)
--- วิธีเก็บ: วาร์ปตัวละครไปแตะเพชรที่อยู่ใกล้ตัว (ในรัศมี CONFIG.GemRadius) แล้วกลับที่เดิม
+-- วิธีเก็บ: ไปแตะเพชรทั่วโซนเป้าหมาย ใช้รัศมีสำรองเมื่อยังไม่มีข้อมูลโซน
 local gemLogged = false
 
 local function gemPart(g)
@@ -1038,18 +1057,21 @@ local function nearbyGems(root, radius)
 	local folder = workspace:FindFirstChild("EggGemDrops")
 	local list = {}
 	if not folder then return list end
+	local targetZone = gemZoneTarget()
+	local hasZones = next(ZonePos) ~= nil
 	for _, g in ipairs(folder:GetChildren()) do
 		local part = gemPart(g)
-		if part and (part.Position - root.Position).Magnitude <= (radius or CONFIG.GemRadius) then
+		if part and ((hasZones and zoneOfPosition(part.Position) == targetZone)
+			or (not hasZones and (part.Position - root.Position).Magnitude <= (radius or CONFIG.GemRadius))) then
 			table.insert(list, g)
 		end
 	end
 	return list
 end
 
--- เก็บเพชรแบบสคริปต์รุ่นก่อน: Tween (Noclip) ไปหาเพชรที่ตกใกล้ตัวทีละเม็ด จนหมด
+-- เก็บเพชรแบบสคริปต์รุ่นก่อน: Tween (Noclip) ไปหาเพชรในโซนเป้าหมายทีละเม็ด จนหมด
 local gemSkip = setmetatable({}, { __mode = "k" })   -- เพชรที่เก็บไม่ติด -> ข้ามไปก่อนจนถึงเวลานี้
--- มีเพชรที่เก็บได้จริงอยู่ในรัศมีไหม (ไม่นับเม็ดที่เพิ่งเก็บไม่ติด)
+-- มีเพชรที่เก็บได้จริงอยู่ในโซนเป้าหมายไหม (ไม่นับเม็ดที่เพิ่งเก็บไม่ติด)
 hasCollectableGems = function(radius)
 	local _, root = getChar()
 	if not root then return false end
@@ -1101,13 +1123,13 @@ grabNearbyGems = function(shouldStop, radius)
 end
 
 -- ตอนเปิดฟาร์ม ระบบฟาร์มจะเรียกเก็บเพชรเองระหว่างตีไข่
--- ตอนไม่ได้ฟาร์ม สวิตช์นี้จะวนเก็บเพชรใกล้ตัวเอง
+-- ตอนไม่ได้ฟาร์ม สวิตช์นี้จะวนเก็บเพชรในโซนที่ตัวละครอยู่
 function Callbacks.CollectGems(on)
 	State.CollectGems = on
 	State.GemRun += 1
 	if not on then return end
 	local run = State.GemRun
-	say("เปิดเก็บเพชร (รัศมี " .. CONFIG.GemRadius .. " studs)")
+	say("เปิดเก็บเพชรในโซนที่ฟาร์ม (ถ้าไม่ได้ฟาร์ม ใช้โซนที่ตัวละครอยู่)")
 	while State.CollectGems and State.GemRun == run do
 		if not State.AutoFarm then grabNearbyGems(function() return not State.CollectGems or State.AutoFarm end) end
 		task.wait(0.2)
