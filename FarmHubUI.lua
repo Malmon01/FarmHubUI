@@ -44,7 +44,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-14 r35"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-14 r36"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- อ่านเงินทั้งค่าที่พิมพ์และข้อความเหนือหัวสัตว์ (แยกหน่วยยาวก่อน)
@@ -1032,6 +1032,7 @@ end
 ---------------------------------------------------------------------
 -- Callbacks
 ---------------------------------------------------------------------
+local finderResume -- จำสวิตช์หาตัวไว้จนฟาร์มกลับถึงโซน
 local Callbacks = {}
 local motionLoops = {} -- รอเธรดฟาร์ม/เพชรหยุดจริงก่อนเริ่มส่งสัตว์
 
@@ -1049,7 +1050,7 @@ function Callbacks.AutoFarm(on)
 	State.AutoFarm = on
 	State.FarmRun += 1
 	State.ReadyZone = nil
-	if not on then return end
+	if not on then finderResume = nil return end
 	local thread = coroutine.running()
 	motionLoops[thread] = true
 	local run = State.FarmRun
@@ -1077,13 +1078,14 @@ function Callbacks.AutoFarm(on)
 			local target = State.Zone
 			local warmZone = warmUp(stopped)
 			if stopped() then break end
-			State.ReadyZone = target
 			if warmZone == target then
 				say("ขั้นที่ 4: อยู่ใน", target, "แล้ว เริ่มฟาร์มเลย")
 			else
 				say("ขั้นที่ 4: ไปฟาร์มที่", target)
 				goToZone(target, stopped)   -- วาร์ป (โซนไกลวาร์ปผ่านโซนก่อนหน้า) แล้วเริ่มฟาร์ม
 			end
+			if stopped() then break end
+			State.ReadyZone = target
 		else
 			local egg = findEgg(State.Zone, ALL_EGGS, true)
 			if egg then
@@ -1408,6 +1410,7 @@ local infiniteJump = UIS.JumpRequest:Connect(function()
 end)
 gui.Destroying:Connect(function()
 	State.Closed = true
+	finderResume = nil
 	State.FindMoney, State.FindBuff = false, false
 	State.AutoFarm = false
 	Callbacks.CollectGems(false)
@@ -1810,12 +1813,19 @@ local secondaryPicker = makeMultiSelect(findPage, "ตัวอันดับ 2
 makeDropdown(findPage, "พาไปที่", { "กลับบ้าน", "จุด AFK" }, Finder.MoneyDestination, function(v)
 	Finder.MoneyDestination = v
 end)
-local moneyToggle = makeToggle(findPage, "เปิดหาตัว (กลุ่ม 1)", false, function(on) State.FindMoney = on end)
+local moneyToggle, buffToggle
+moneyToggle = makeToggle(findPage, "เปิดหาตัว (กลุ่ม 1)", false, function(on)
+	if on and (State.DeliveryBusy or State.Closed) then moneyToggle.Set(false) return end
+	State.FindMoney = on
+end)
 makeNote(findPage, "หาตัวติดบัพ")
 makeDropdown(findPage, "พาไปที่", { "กลับบ้าน", "จุด AFK" }, Finder.BuffDestination, function(v)
 	Finder.BuffDestination = v
 end)
-local buffToggle = makeToggle(findPage, "เปิดหาตัวติดบัพ (กลุ่ม 2)", false, function(on) State.FindBuff = on end)
+buffToggle = makeToggle(findPage, "เปิดหาตัวติดบัพ (กลุ่ม 2)", false, function(on)
+	if on and (State.DeliveryBusy or State.Closed) then buffToggle.Set(false) return end
+	State.FindBuff = on
+end)
 local animalPicker = makeMultiSelect(findPage, "ตัว", {}, Finder.Animals)
 makeMultiSelect(findPage, "บัพ", { "Hacker", "Time", "Haeven", "Thunder", "Void", "ice", "Gold", "Diamond" },
 	Finder.Buffs, nil, "ล้าง (ไม่เลือก)", "ไม่เลือก")
@@ -1917,7 +1927,9 @@ local function animalDetails(animal)
 	add(animal:GetAttribute("Mutation"))
 	return cps or 0, buffs, cash and cash:IsA("TextLabel") and cash.Text
 end
-local function chooseAnimal()
+local function chooseAnimal(findMoney, findBuff)
+	if findMoney == nil then findMoney = State.FindMoney end
+	if findBuff == nil then findBuff = State.FindBuff end
 	local folder = workspace:FindFirstChild("AnimalPickups")
 	if not folder then return end
 	local candidates, anyAFK = {}, false
@@ -1928,12 +1940,12 @@ local function chooseAnimal()
 			local cps, buffs = animalDetails(animal)
 			local name = animal:GetAttribute("AnimalName")
 			local rank
-			if State.FindMoney then
+			if findMoney then
 				if Finder.Minimum and cps >= Finder.Minimum then rank = 1
 				elseif Finder.Secondary[name] then rank = 2 end
 			end
 			local buffMatch = false
-			if State.FindBuff and (next(Finder.Animals) == nil or Finder.Animals[name]) then
+			if findBuff and (next(Finder.Animals) == nil or Finder.Animals[name]) then
 				for buff in pairs(Finder.Buffs) do
 					if buffs[buff:lower()] then buffMatch = true break end
 				end
@@ -2040,7 +2052,7 @@ local function stealSameAnimal(animal, timeout, immediate, shouldStop, reselect)
 			-- เลือกค่าสูงสุดอีกครั้งหลังเดินทาง แล้วล็อก HatchId ตั้งแต่กดครั้งแรก
 			if reselect and lastPress == -math.huge then
 				local candidate
-				candidate, destination = chooseAnimal()
+				candidate, destination = reselect()
 				if not candidate then return false end
 				local nextHatch = candidate.Animal:GetAttribute("HatchId")
 				if nextHatch ~= hatchId then
@@ -2077,10 +2089,24 @@ local function deliverAnimal(animal, destination)
 	if State.DeliveryBusy or os.clock() - deliveryEndedAt < 2 then return end
 	State.DeliveryBusy = true
 	local farmWasOn = State.AutoFarm or farmToggle.Get()
+	local findMoney, findBuff = moneyToggle.Get(), buffToggle.Get()
+	local finderPaused = false
+	local function pauseFinder()
+		if destination ~= "กลับบ้าน" then return end
+		finderPaused = true
+		State.FindMoney, State.FindBuff = false, false
+		moneyToggle.Set(false)
+		buffToggle.Set(false)
+	end
+	pauseFinder()
+	local function chooseDeliveryAnimal()
+		if finderPaused then return chooseAnimal(findMoney, findBuff) end
+		return chooseAnimal()
+	end
 	local zone, character = State.Zone, player.Character
 	local function shouldStop()
 		return State.Closed or State.Zone ~= zone or player.Character ~= character
-			or not getChar() or not (State.FindMoney or State.FindBuff)
+			or not getChar() or (not finderPaused and not (State.FindMoney or State.FindBuff))
 	end
 	local ok, err = pcall(function()
 		finderSay("กำลังหยุดฟาร์มเพื่อเลือกสัตว์")
@@ -2095,7 +2121,7 @@ local function deliverAnimal(animal, destination)
 			if shouldStop() then error("ยกเลิกการส่งสัตว์") end
 		until not State.AutoFarm and not State.CollectGems and next(motionLoops) == nil
 		if isCarrying() then error("กำลังถือสัตว์ตัวอื่นอยู่") end
-		local candidate, currentDestination = chooseAnimal()
+		local candidate, currentDestination = chooseDeliveryAnimal()
 		if not candidate then
 			finderSay("ไม่มีสัตว์ที่ตรงเงื่อนไขแล้ว ยกเลิกการส่ง")
 			return
@@ -2103,9 +2129,10 @@ local function deliverAnimal(animal, destination)
 		animal, destination = candidate.Animal, currentDestination
 		local _, _, hum = getChar()
 		hum:UnequipTools()
-		local lifted, selectedAnimal, selectedDestination = stealSameAnimal(animal, 5, false, shouldStop, true)
+		local lifted, selectedAnimal, selectedDestination = stealSameAnimal(animal, 5, false, shouldStop, chooseDeliveryAnimal)
 		if not lifted then error("ยกสัตว์ไม่สำเร็จ") end
 		animal, destination = selectedAnimal, selectedDestination
+		pauseFinder()
 		local guard = getGuard(zone)
 		if not guard then error("ไม่พบผู้พิทักษ์ของโซน") end
 		finderSay("รอผู้พิทักษ์ตีให้สัตว์ตก")
@@ -2146,12 +2173,24 @@ local function deliverAnimal(animal, destination)
 	deliveryEndedAt = os.clock()
 	State.DeliveryBusy = false
 	if not ok then finderSay("ส่งสัตว์ไม่สำเร็จ " .. tostring(err)) end
-	if not State.Closed and destination == "กลับบ้าน" and (ok or farmWasOn) then farmToggle.Set(true) end
+	if not State.Closed and destination == "กลับบ้าน" and (ok or farmWasOn) then
+		finderResume = { Money = findMoney, Buff = findBuff }
+		farmToggle.Set(true)
+	end
 end
 
 task.spawn(function()
 	while gui.Parent do
-		if (State.FindMoney or State.FindBuff) and not State.DeliveryBusy then
+		-- รอผ่านขั้นเตรียมและวาร์ปจนถึงโซนที่เลือกจริงก่อนเปิดหาตัวต่อ
+		local inFarmZone = State.AutoFarm and State.ReadyZone == State.Zone and isNearZone(State.Zone)
+		if finderResume and not State.Closed and not State.DeliveryBusy and inFarmZone then
+			local resume = finderResume
+			finderResume = nil
+			if resume.Money then moneyToggle.Set(true) end
+			if resume.Buff then buffToggle.Set(true) end
+			say("ถึง " .. State.Zone .. " แล้ว เปิดหาตัวต่อ")
+		end
+		if (State.FindMoney or State.FindBuff) and not State.DeliveryBusy and inFarmZone then
 			local ok, err = pcall(function()
 				local candidate, destination = chooseAnimal()
 				if candidate then deliverAnimal(candidate.Animal, destination)
