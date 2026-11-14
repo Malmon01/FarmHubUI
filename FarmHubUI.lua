@@ -44,7 +44,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-14 r40"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-14 r41"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- อ่านเงินทั้งค่าที่พิมพ์และข้อความเหนือหัวสัตว์ (แยกหน่วยยาวก่อน)
@@ -2081,19 +2081,26 @@ end
 
 local function stealSameAnimal(animal, timeout, immediate, shouldStop, reselect)
 	-- เก็บตัวตนแยกจากโมเดล เพราะเกมสร้างโมเดลใหม่เมื่อสัตว์ตก
-	local hatchId = animal:GetAttribute("HatchId")
-	local targetName = animal:GetAttribute("AnimalName")
-	local animalRoot = animal:FindFirstChild("RootPart")
+	local identity = type(animal) == "table" and animal or {
+		HatchId = animal:GetAttribute("HatchId"), Name = animal:GetAttribute("AnimalName"),
+	}
+	local hatchId, targetName = identity.HatchId, identity.Name
+	local animalRoot = type(animal) ~= "table" and animal:FindFirstChild("RootPart")
 	local _, root = getChar()
 	local nearPos = immediate and root and root.Position or (animalRoot and animalRoot.Position)
 	local selectedAnimal = animal
 	local function findAnimalByHatch(hatchId, nearPos)
 		local folder = workspace:FindFirstChild("AnimalPickups")
 		if not folder then return end
-		local nearest, bestDistance = nil, 40
+		-- รอบเก็บซ้ำใช้ตำแหน่งผู้เล่นปัจจุบัน และรับโมเดลที่เพิ่งเกิดชื่อเดียวกัน
+		if immediate then
+			local _, currentRoot = getChar()
+			nearPos = currentRoot and currentRoot.Position
+		end
+		local nearest, bestDistance = nil, 80
 		for _, candidate in ipairs(folder:GetChildren()) do
 			if candidate:IsA("Model") then
-				if candidate:GetAttribute("HatchId") == hatchId then return candidate end
+				if hatchId ~= nil and candidate:GetAttribute("HatchId") == hatchId then return candidate end
 				local part = candidate:FindFirstChild("RootPart")
 				if nearPos and part and part:IsA("BasePart") and candidate:GetAttribute("AnimalName") == targetName then
 					local distance = (part.Position - nearPos).Magnitude
@@ -2109,7 +2116,8 @@ local function stealSameAnimal(animal, timeout, immediate, shouldStop, reselect)
 		local _, currentRoot = getChar()
 		local distance = prompt and currentRoot and (promptPos(prompt) - currentRoot.Position).Magnitude
 		local folder = workspace:FindFirstChild("CarriedAnimals")
-		finderSay("หมดเวลายก " .. tostring(targetName) .. " HatchId=" .. tostring(hatchId)
+		finderSay("หมดเวลายก " .. tostring(targetName) .. " HatchId=" .. tostring(identity.HatchId)
+			.. " AnimalName=" .. tostring(identity.Name)
 			.. " พบจุด StealPrompt=" .. tostring(prompt ~= nil)
 			.. " ระยะ=" .. (distance and string.format("%.1f", distance) or "ไม่ทราบ")
 			.. " จำนวนใน CarriedAnimals=" .. tostring(folder and #folder:GetChildren() or 0)
@@ -2132,7 +2140,7 @@ local function stealSameAnimal(animal, timeout, immediate, shouldStop, reselect)
 		local carried = carriedAnimal()
 		if isCarrying() then
 			local carriedHatch = carried and carried:GetAttribute("HatchId")
-			if carriedHatch == nil or carriedHatch == hatchId then return true, carried or selectedAnimal, destination end
+			if carriedHatch == nil or carriedHatch == hatchId then return true, identity, destination end
 			wrongSince = wrongSince or os.clock()
 			-- เผื่อโฟลเดอร์ฝั่งเซิร์ฟเวอร์อัปเดตคนละเฟรม
 			if os.clock() - wrongSince >= 0.3 then
@@ -2146,8 +2154,8 @@ local function stealSameAnimal(animal, timeout, immediate, shouldStop, reselect)
 			wrongSince = nil
 			animal = findAnimalByHatch(hatchId, nearPos)
 			if animal then appeared = true end
-			-- รอโมเดลที่ตกปรากฏได้สองวินาที โดยค้นหาใหม่ทุกเฟรม
-			if immediate and not appeared and os.clock() - started >= 2 then break end
+			-- รอโมเดลที่ตกปรากฏได้ 2.5 วินาที โดยค้นหาใหม่ทุกเฟรม
+			if immediate and not appeared and os.clock() - started >= 2.5 then break end
 			local _, currentRoot = getChar()
 			if not currentRoot then return false end
 			local prompt = animal and animalPrompt(animal)
@@ -2168,9 +2176,10 @@ local function stealSameAnimal(animal, timeout, immediate, shouldStop, reselect)
 				candidate, destination = reselect()
 				if not candidate then return false end
 				local nextHatch = candidate.Animal:GetAttribute("HatchId")
-				if nextHatch ~= hatchId then
+				if candidate.Animal ~= selectedAnimal then
 					selectedAnimal = candidate.Animal
 					hatchId, targetName = nextHatch, selectedAnimal:GetAttribute("AnimalName")
+					identity = { HatchId = hatchId, Name = targetName }
 					local part = selectedAnimal:FindFirstChild("RootPart")
 					nearPos = part and part.Position
 					continue
@@ -2183,6 +2192,9 @@ local function stealSameAnimal(animal, timeout, immediate, shouldStop, reselect)
 				currentRoot.CFrame = besideCFrame(promptPos(prompt), currentRoot, 2)
 				currentRoot.AssemblyLinearVelocity = Vector3.zero
 				if lastPress == -math.huge then
+					-- ล็อกตัวตนจากโมเดลบนพื้นก่อนกด รวมถึงตัวชื่อเดิมที่เกิดใหม่
+					hatchId, targetName = animal:GetAttribute("HatchId"), animal:GetAttribute("AnimalName")
+					identity = { HatchId = hatchId, Name = targetName }
 					local cps, _, cashText = animalDetails(animal)
 					finderSay("เลือก " .. tostring(targetName)
 						.. " " .. (cashText or ("$" .. string.format("%.6g", cps) .. "/s")))
