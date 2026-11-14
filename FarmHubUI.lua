@@ -44,7 +44,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-14 r38"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-14 r39"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- อ่านเงินทั้งค่าที่พิมพ์และข้อความเหนือหัวสัตว์ (แยกหน่วยยาวก่อน)
@@ -983,6 +983,24 @@ local function zoneTarget(zoneName, root)
 	return onGround(CFrame.new(cf.Position + Vector3.new(0, 5, 0)))
 end
 
+-- ตรึงหลังวาร์ปเพื่อล้างแรงกระเด็น โดยไม่ลดความสูงที่ระบบกันจมยกไว้
+local function holdAfterTeleport(cf, duration)
+	local char, root = getChar()
+	if not root then return end
+	local started = os.clock()
+	while os.clock() - started < (duration or 1.2) do
+		RunService.Heartbeat:Wait()
+		if player.Character ~= char or not char.Parent or not root.Parent then return end
+		local pos = root.Position
+		local drift = Vector3.new(pos.X - cf.Position.X, 0, pos.Z - cf.Position.Z)
+		if drift.Magnitude > 1 then
+			root.CFrame = cf + Vector3.new(0, math.max(0, pos.Y - cf.Position.Y), 0)
+		end
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+	end
+end
+
 -- วาร์ปทันทีไปโซน (ถ้าเกมดึงตัวกลับ จะวาร์ปซ้ำ สูงสุด CONFIG.TeleportRetries ครั้ง)
 local function teleportInto(zoneName)
 	for attempt = 1, CONFIG.TeleportRetries do
@@ -992,6 +1010,7 @@ local function teleportInto(zoneName)
 		if not target then return false end
 		root.CFrame = target
 		root.AssemblyLinearVelocity = Vector3.zero
+		holdAfterTeleport(target)
 		task.wait(0.4)
 		if root.Parent and (root.Position - target.Position).Magnitude < 40 then return true end
 		say("เกมดึงตัวกลับหลังวาร์ป ลองใหม่ (ครั้งที่ " .. attempt .. ")")
@@ -1421,6 +1440,14 @@ end)
 local antiSink = RunService.Heartbeat:Connect(function()
 	local char, root, hum = getChar()
 	if not root or tweenMoving or hum:GetState() == Enum.HumanoidStateType.Seated then return end
+	-- หยุดไถลเมื่อไม่มีอินพุต แต่คงความเร็วแนวดิ่งและการกระโดดไว้
+	local state = hum:GetState()
+	if hum.MoveDirection.Magnitude < 0.1 and state ~= Enum.HumanoidStateType.Jumping
+		and state ~= Enum.HumanoidStateType.Freefall then
+		local velocity = root.AssemblyLinearVelocity
+		root.AssemblyLinearVelocity = Vector3.new(0, velocity.Y, 0)
+		root.AssemblyAngularVelocity = Vector3.zero
+	end
 	local standHeight = root.Size.Y / 2 + (hum.RigType == Enum.HumanoidRigType.R6 and 2 or hum.HipHeight)
 	local list = { char }
 	local gems = workspace:FindFirstChild("EggGemDrops")
@@ -2184,6 +2211,7 @@ local function deliverAnimal(animal, destination)
 			root.CFrame = target
 			root.AssemblyLinearVelocity = Vector3.zero
 			root.AssemblyAngularVelocity = Vector3.zero
+			holdAfterTeleport(target, destination == "จุด AFK" and 2 or 1.2)
 			task.wait(0.4)
 			local _, currentRoot = getChar()
 			if currentRoot and (currentRoot.Position - target.Position).Magnitude <= 40 then arrived = true break end
