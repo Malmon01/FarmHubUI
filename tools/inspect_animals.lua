@@ -7,7 +7,7 @@ local function attrs(i)
 end
 local seen, count = {}, 0
 for _, d in ipairs(workspace:GetDescendants()) do
-	if d:IsA("ProximityPrompt") and count < 6 then
+	if d:IsA("ProximityPrompt") and d.ActionText:lower():find("steal") and count < 6 then
 		local holder = d:FindFirstAncestorWhichIsA("Model") or d.Parent
 		if holder and not seen[holder] then
 			seen[holder] = true
