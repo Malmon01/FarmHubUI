@@ -44,7 +44,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-14 r33"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-14 r34"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- อ่านเงินทั้งค่าที่พิมพ์และข้อความเหนือหัวสัตว์ (แยกหน่วยยาวก่อน)
@@ -433,9 +433,29 @@ local function setSwing(on)
 	syncAutoSwing()
 end
 
--- กำลังยกสัตว์อยู่ไหม (ตอนยก เกมจะโชว์ปุ่ม Drop) จำปุ่มไว้ ไม่ต้องสแกนทุกครั้ง
+-- เช็กสัตว์ที่อยู่ใกล้หรือเชื่อมกับตัวเรา ใช้ปุ่ม Drop สำรองเมื่อไม่มีโฟลเดอร์เท่านั้น
+local function carriedAnimal()
+	local folder = workspace:FindFirstChild("CarriedAnimals")
+	local char, root = getChar()
+	if not folder or not root then return end
+	for _, animal in ipairs(folder:GetDescendants()) do
+		if animal:IsA("Model") then
+			for _, part in ipairs(animal:GetDescendants()) do
+				if part:IsA("BasePart") then
+					if part:IsDescendantOf(char) or (part.Position - root.Position).Magnitude <= 15 then
+						return animal
+					end
+					for _, connected in ipairs(part:GetConnectedParts(true)) do
+						if connected:IsDescendantOf(char) then return animal end
+					end
+				end
+			end
+		end
+	end
+end
 local dropBtn, dropScanAt = nil, 0
 local function isCarrying()
+	if workspace:FindFirstChild("CarriedAnimals") then return carriedAnimal() ~= nil end
 	if dropBtn and dropBtn.Parent then return isShown(dropBtn) end
 	if os.clock() < dropScanAt then return false end
 	dropScanAt = os.clock() + 0.3
@@ -855,7 +875,7 @@ local function waitForGuardHit(guard, shouldStop)
 	local _, root, hum = getChar()
 	if not root then return false end
 	local hit, conns = false, {}
-	-- ถ้ายกสัตว์อยู่: "โดนตีแล้ว" = ผู้พิทักษ์แย่งสัตว์ไป (ปุ่ม Drop หาย) แม่นที่สุด
+	-- ถ้ายกสัตว์อยู่: "โดนตีแล้ว" = ตรวจว่าไม่มีสัตว์ที่เราถือแล้ว
 	-- ถ้าไม่ได้ยก: ใช้เลือดลด / ตาย / CatchFlingRemote / กระเด็น แทน
 	local carrying = isCarrying()
 	local lastHealth = hum.Health
@@ -1863,7 +1883,16 @@ local function animalPrompt(animal)
 			local prompt = anchor:FindFirstChild("StealPrompt")
 			local distance = (anchor.Position - root.Position).Magnitude
 			if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled and distance <= bestDistance then
-				best, bestDistance = prompt, distance
+				local belongsToTarget = true
+				for _, other in ipairs(animal.Parent:GetChildren()) do
+					local otherRoot = other:IsA("Model") and other:FindFirstChild("RootPart")
+					if other ~= animal and otherRoot and otherRoot:IsA("BasePart")
+						and (anchor.Position - otherRoot.Position).Magnitude <= distance then
+						belongsToTarget = false
+						break
+					end
+				end
+				if belongsToTarget then best, bestDistance = prompt, distance end
 			end
 		end
 	end
@@ -1884,7 +1913,7 @@ local function animalDetails(animal)
 	if mutation and mutation:IsA("TextLabel") then add(mutation.Text) end
 	add(animal:GetAttribute("AuraMutation"))
 	add(animal:GetAttribute("Mutation"))
-	return cps or 0, buffs
+	return cps or 0, buffs, cash and cash:IsA("TextLabel") and cash.Text
 end
 local function chooseAnimal()
 	local folder = workspace:FindFirstChild("AnimalPickups")
@@ -1917,25 +1946,26 @@ local function chooseAnimal()
 	end
 	local best
 	for _, candidate in ipairs(candidates) do
-		if not best or (anyAFK and candidate.Cps > best.Cps)
-			or (not anyAFK and (candidate.Rank < best.Rank
-				or (candidate.Rank == best.Rank and candidate.Cps > best.Cps))) then best = candidate end
+		if not best or candidate.Cps > best.Cps
+			or (candidate.Cps == best.Cps and candidate.Rank < best.Rank) then best = candidate end
 	end
 	return best, anyAFK and "จุด AFK" or "กลับบ้าน"
 end
 
-local function stealSameAnimal(animal, timeout, immediate, shouldStop)
-	-- เวลาเดินทางรอบแรกแยกจากเวลารอกดเก็บ ส่วนรอบล้มต้องเก็บทันที
+local function stealSameAnimal(animal, timeout, immediate, shouldStop, reselect)
+	-- เวลาเดินทางรอบแรกแยกจากเวลารอกดเก็บ ส่วนรอบล้มต้องเก็บตัวเดิมทันที
+	if isCarrying() then return false end
 	if not immediate then
 		local prompt = animalPrompt(animal)
 		local _, root = getChar()
 		if not prompt or not root then return false end
 		if not tweenTo(onGround(besideCFrame(promptPos(prompt), root, 2), animal), shouldStop) then return false end
 	end
-	local started = os.clock()
+	local started, destination = os.clock(), nil
 	local function timedOut() return shouldStop() or os.clock() - started >= timeout end
 	while not timedOut() do
-		if not animalPresent(animal) then return false end
+		if isCarrying() then return false end
+		if not animalPresent(animal) and not reselect then return false end
 		local _, root = getChar()
 		if not root then return false end
 		local prompt = animalPrompt(animal)
@@ -1945,19 +1975,61 @@ local function stealSameAnimal(animal, timeout, immediate, shouldStop)
 			elseif (root.Position - cf.Position).Magnitude > 4 then
 				if not tweenTo(onGround(cf, animal), timedOut) then return false end
 			end
-			if timedOut() then return false end
-			-- จุดกดอาจย้ายระหว่างเดินทาง จึงตรวจจับคู่ใหม่ก่อนกด
-			prompt = animalPrompt(animal)
-			if prompt then triggerPrompt(prompt) end
 		end
-		if isCarrying() then return true end
+		if timedOut() then return false end
+		-- เลือกค่าสูงสุดอีกครั้งหลังเดินทาง ก่อนกดจริงโดยไม่มีการรอคั่น
+		if reselect then
+			local candidate
+			candidate, destination = chooseAnimal()
+			if not candidate then return false end
+			if candidate.Animal ~= animal then
+				animal = candidate.Animal
+				continue
+			end
+		end
+		prompt = animalPrompt(animal)
+		if prompt then
+			-- ยืนติดจุดกดที่จับคู่ใหม่ เพื่อไม่ให้คีย์ E ไปโดนตัวข้าง ๆ
+			root.CFrame = besideCFrame(promptPos(prompt), root, 2)
+			root.AssemblyLinearVelocity = Vector3.zero
+			if isCarrying() then return false end
+			local cps, _, cashText = animalDetails(animal)
+			finderSay("เลือก " .. tostring(animal:GetAttribute("AnimalName") or animal.Name)
+				.. " " .. (cashText or ("$" .. string.format("%.6g", cps) .. "/s")))
+			triggerPrompt(prompt)
+			-- กดครั้งเดียวแล้วรอผล ห้ามกดซ้ำระหว่างรอข้อมูลจากเซิร์ฟเวอร์
+			local wrongSince
+			local verifyStarted = os.clock()
+			repeat
+				local carried = carriedAnimal()
+				local folder = workspace:FindFirstChild("CarriedAnimals")
+				local targetCarried = folder and animal:IsDescendantOf(folder)
+				if isCarrying() then
+					if targetCarried or not animalPresent(animal) then return true, animal, destination end
+					wrongSince = wrongSince or os.clock()
+					-- เผื่อโฟลเดอร์ฝั่งเซิร์ฟเวอร์อัปเดตคนละเฟรม
+					if os.clock() - wrongSince >= 0.3 then
+						finderSay("ยกผิดตัว " .. tostring(carried and (carried:GetAttribute("AnimalName") or carried.Name) or "ไม่ทราบชื่อ")
+							.. " วางสัตว์และยกเลิกการส่ง")
+						local drop = ReplicatedStorage:FindFirstChild("DropCarriedRemote", true)
+						if drop and drop:IsA("RemoteEvent") then drop:FireServer() end
+						return false
+					end
+				else
+					wrongSince = nil
+				end
+				task.wait(0.05)
+			until shouldStop() or os.clock() - verifyStarted >= timeout
+			return false
+		end
 		task.wait(0.05)
 	end
 	return false
 end
 
-local function deliverAnimal(candidate, destination)
-	if State.DeliveryBusy then return end
+local deliveryEndedAt = -math.huge
+local function deliverAnimal(animal, destination)
+	if State.DeliveryBusy or os.clock() - deliveryEndedAt < 2 then return end
 	State.DeliveryBusy = true
 	local farmWasOn = State.AutoFarm or farmToggle.Get()
 	local zone, character = State.Zone, player.Character
@@ -1966,7 +2038,7 @@ local function deliverAnimal(candidate, destination)
 			or not getChar() or not (State.FindMoney or State.FindBuff)
 	end
 	local ok, err = pcall(function()
-		finderSay("กำลังไปรับ " .. tostring(candidate.Animal:GetAttribute("AnimalName")))
+		finderSay("กำลังหยุดฟาร์มเพื่อเลือกสัตว์")
 		farmToggle.Set(false)
 		gemToggle.Set(false)
 		-- Set เรียก callback ในเธรดใหม่ รอทั้งสถานะและเธรดเคลื่อนที่ให้จบ
@@ -1978,9 +2050,17 @@ local function deliverAnimal(candidate, destination)
 			if shouldStop() then error("ยกเลิกการส่งสัตว์") end
 		until not State.AutoFarm and not State.CollectGems and next(motionLoops) == nil
 		if isCarrying() then error("กำลังถือสัตว์ตัวอื่นอยู่") end
+		local candidate, currentDestination = chooseAnimal()
+		if not candidate then
+			finderSay("ไม่มีสัตว์ที่ตรงเงื่อนไขแล้ว ยกเลิกการส่ง")
+			return
+		end
+		animal, destination = candidate.Animal, currentDestination
 		local _, _, hum = getChar()
 		hum:UnequipTools()
-		if not stealSameAnimal(candidate.Animal, 5, false, shouldStop) then error("ยกสัตว์ไม่สำเร็จ") end
+		local lifted, selectedAnimal, selectedDestination = stealSameAnimal(animal, 5, false, shouldStop, true)
+		if not lifted then error("ยกสัตว์ไม่สำเร็จ") end
+		animal, destination = selectedAnimal, selectedDestination
 		local guard = getGuard(zone)
 		if not guard then error("ไม่พบผู้พิทักษ์ของโซน") end
 		finderSay("รอผู้พิทักษ์ตีให้สัตว์ตก")
@@ -1988,7 +2068,7 @@ local function deliverAnimal(candidate, destination)
 			error("ผู้พิทักษ์ยังไม่ทำให้สัตว์ตก")
 		end
 		-- เก็บตัวเดิมทันทีตอนยังล้ม ห้ามรอให้ลุกก่อนวาร์ป
-		if not stealSameAnimal(candidate.Animal, 3, true, shouldStop) then error("ยกสัตว์ตัวเดิมซ้ำไม่สำเร็จ") end
+		if not stealSameAnimal(animal, 3, true, shouldStop) then error("ยกสัตว์ตัวเดิมซ้ำไม่สำเร็จ") end
 		local target = destination == "จุด AFK" and CONFIG.AFK or CONFIG.Home
 		local arrived = false
 		for _ = 1, 3 do
@@ -2018,6 +2098,7 @@ local function deliverAnimal(candidate, destination)
 			finderSay("ฝากสัตว์แล้ว เริ่มฟาร์มต่อ")
 		end
 	end)
+	deliveryEndedAt = os.clock()
 	State.DeliveryBusy = false
 	if not ok then finderSay("ส่งสัตว์ไม่สำเร็จ " .. tostring(err)) end
 	if not State.Closed and destination == "กลับบ้าน" and (ok or farmWasOn) then farmToggle.Set(true) end
@@ -2028,7 +2109,7 @@ task.spawn(function()
 		if (State.FindMoney or State.FindBuff) and not State.DeliveryBusy then
 			local ok, err = pcall(function()
 				local candidate, destination = chooseAnimal()
-				if candidate then deliverAnimal(candidate, destination)
+				if candidate then deliverAnimal(candidate.Animal, destination)
 				else pcall(function() finderStatus.Text = "สถานะหาตัว รอสัตว์ที่ตรงเงื่อนไข" end) end
 			end)
 			if not ok then finderSay("ตรวจหาสัตว์ไม่สำเร็จ " .. tostring(err)) end
