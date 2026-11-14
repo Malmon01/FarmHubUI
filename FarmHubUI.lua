@@ -44,7 +44,7 @@ local CONFIG = {
 	ZoneOrder  = {},
 	ZoneModels = {},               -- "โซนที่ N" -> workspace.Build.ZoneBuilds.ZoneN
 }
-local VERSION = "2026-11-14 r37"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
+local VERSION = "2026-11-14 r38"   -- เช็กใน F9 ว่าได้เวอร์ชันล่าสุด
 local ALL_EGGS = "ทั้งหมด"
 
 -- อ่านเงินทั้งค่าที่พิมพ์และข้อความเหนือหัวสัตว์ (แยกหน่วยยาวก่อน)
@@ -627,6 +627,7 @@ local function eggCFrame(egg, root)
 end
 
 -- เคลื่อนที่แบบ Tween ด้วยความเร็ว CONFIG.TweenSpeed (studs/วินาที)
+local tweenMoving = false -- งดแก้การจมระหว่างเคลื่อนที่ด้วย Tween
 local function tweenTo(cf, shouldStop)
 	local _, root = getChar()
 	if not root then return false end
@@ -646,9 +647,11 @@ local function tweenTo(cf, shouldStop)
 	local tween = TweenService:Create(root, TweenInfo.new(t, Enum.EasingStyle.Linear), { CFrame = cf })
 	local done = false
 	local c = tween.Completed:Connect(function() done = true end)
+	tweenMoving = true
 	tween:Play()
 	while not done and not (shouldStop and shouldStop()) and root.Parent do task.wait() end
 	if not done then tween:Cancel() end
+	tweenMoving = false
 	c:Disconnect()
 	hold:Disconnect()
 	noclip:Disconnect()
@@ -1414,6 +1417,26 @@ local globalNoclip = RunService.Stepped:Connect(function()
 		end
 	end
 end)
+-- ยกตัวละครที่จมให้ยืนบนพื้นจริง โดยคงทิศทางและความเร็วแนวราบไว้
+local antiSink = RunService.Heartbeat:Connect(function()
+	local char, root, hum = getChar()
+	if not root or tweenMoving or hum:GetState() == Enum.HumanoidStateType.Seated then return end
+	local standHeight = root.Size.Y / 2 + (hum.RigType == Enum.HumanoidRigType.R6 and 2 or hum.HipHeight)
+	local list = { char }
+	local gems = workspace:FindFirstChild("EggGemDrops")
+	if gems then table.insert(list, gems) end
+	local carried = workspace:FindFirstChild("CarriedAnimals")
+	if carried then table.insert(list, carried) end
+	groundParams.FilterDescendantsInstances = list
+	local hit = workspace:Raycast(root.Position + Vector3.new(0, standHeight + 2, 0), Vector3.new(0, -60, 0), groundParams)
+	if not hit then return end
+	local standY = hit.Position.Y + standHeight
+	if root.Position.Y < standY - 0.25 then
+		root.CFrame = root.CFrame + Vector3.new(0, standY - root.Position.Y, 0)
+		local velocity = root.AssemblyLinearVelocity
+		root.AssemblyLinearVelocity = Vector3.new(velocity.X, math.max(0, velocity.Y), velocity.Z)
+	end
+end)
 local infiniteJump = UIS.JumpRequest:Connect(function()
 	local _, _, hum = getChar()
 	if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
@@ -1425,6 +1448,7 @@ gui.Destroying:Connect(function()
 	State.AutoFarm = false
 	Callbacks.CollectGems(false)
 	globalNoclip:Disconnect()
+	antiSink:Disconnect()
 	infiniteJump:Disconnect()
 end)
 
